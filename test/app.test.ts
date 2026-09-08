@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { buildApp } from "../src/app.js";
-import { ProviderConnectionError } from "../src/errors.js";
+import {
+  ProviderConnectionError,
+  ProviderHttpError,
+  ProviderTimeoutError,
+} from "../src/errors.js";
 import type { LLMProvider } from "../src/providers/provider.js";
 import type { ChatRequest, ChatResponse } from "../src/types/chat.js";
 
@@ -132,4 +136,47 @@ test("POST /v1/chat maps provider connection failures to 503", async (t) => {
   assert.equal(response.statusCode, 503);
   assert.equal(response.json().error.code, "PROVIDER_UNAVAILABLE");
   assert.equal(response.json().error.message, "Unable to connect to Ollama");
+});
+
+test("POST /v1/chat maps provider timeouts to 504", async (t) => {
+  const provider = new StubProvider(async () => {
+    throw new ProviderTimeoutError("Ollama", 120_000);
+  });
+  const app = buildApp({ provider, logger: false });
+  t.after(() => app.close());
+
+  const response = await app.inject({
+    method: "POST",
+    url: "/v1/chat",
+    payload: {
+      model: "llama3.2",
+      messages: [{ role: "user", content: "Hello" }],
+    },
+  });
+
+  assert.equal(response.statusCode, 504);
+  assert.equal(response.json().error.code, "PROVIDER_TIMEOUT");
+  assert.equal(response.json().error.message, "Ollama request timed out");
+});
+
+test("POST /v1/chat does not expose upstream provider details", async (t) => {
+  const provider = new StubProvider(async () => {
+    throw new ProviderHttpError("Ollama", 500, "sensitive upstream detail");
+  });
+  const app = buildApp({ provider, logger: false });
+  t.after(() => app.close());
+
+  const response = await app.inject({
+    method: "POST",
+    url: "/v1/chat",
+    payload: {
+      model: "llama3.2",
+      messages: [{ role: "user", content: "Hello" }],
+    },
+  });
+
+  assert.equal(response.statusCode, 502);
+  assert.equal(response.json().error.code, "PROVIDER_ERROR");
+  assert.equal(response.json().error.message, "Ollama request failed");
+  assert.doesNotMatch(response.body, /sensitive upstream detail/);
 });

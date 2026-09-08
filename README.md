@@ -1,4 +1,4 @@
-# LLM Gateway
+# ModelMux
 
 This milestone is a small HTTP gateway that exposes a provider-neutral chat API and forwards requests to a local Ollama instance. It uses Fastify for HTTP and validation, Pino for structured logs, and native `fetch` for the Ollama call.
 
@@ -52,7 +52,9 @@ cp .env.example .env
 npm run dev
 ```
 
-`PORT` defaults to `3000`. `OLLAMA_BASE_URL` defaults to `http://localhost:11434`. Values from a local `.env` file are loaded when present.
+`PORT` defaults to `3000`, `OLLAMA_BASE_URL` defaults to `http://localhost:11434`, and `OLLAMA_REQUEST_TIMEOUT_MS` defaults to `120000`. Values from a local `.env` file are loaded when present.
+
+Provider connection failures return `503`, provider timeouts return `504`, and other invalid or unsuccessful provider responses return `502`. Public error responses do not include upstream response details.
 
 ## Call the API
 

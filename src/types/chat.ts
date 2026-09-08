@@ -10,6 +10,10 @@ export interface ChatRequest {
   messages: ChatMessage[];
 }
 
+export interface AssistantMessage extends ChatMessage {
+  role: "assistant";
+}
+
 export interface ChatResponse {
-  message: ChatMessage;
+  message: AssistantMessage;
 }

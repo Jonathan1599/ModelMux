@@ -15,10 +15,9 @@ export class ProviderHttpError extends AppError {
   public constructor(
     public readonly provider: string,
     public readonly upstreamStatus: number,
-    detail?: string,
+    public readonly upstreamDetail: string | undefined,
   ) {
-    const suffix = detail ? `: ${detail}` : "";
-    super(`${provider} returned HTTP ${upstreamStatus}${suffix}`);
+    super(`${provider} request failed`);
   }
 }
 
@@ -37,5 +36,18 @@ export class ProviderResponseError extends AppError {
 
   public constructor(provider: string, cause?: unknown) {
     super(`${provider} returned an invalid response`, { cause });
+  }
+}
+
+export class ProviderTimeoutError extends AppError {
+  public readonly statusCode = 504;
+  public readonly code = "PROVIDER_TIMEOUT";
+
+  public constructor(
+    provider: string,
+    public readonly timeoutMs: number,
+    cause?: unknown,
+  ) {
+    super(`${provider} request timed out`, { cause });
   }
 }

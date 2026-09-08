@@ -1,4 +1,4 @@
-You are helping me build **WeighBridge**, a production-style LLM inference gateway in Node.js/TypeScript for backend engineering interviews.
+You are helping me build **ModelMux**, a production-style LLM inference gateway in Node.js/TypeScript for backend engineering interviews.
 
 The goal is not to maximize features. The goal is to build a clean, understandable backend system that demonstrates:
 
@@ -37,6 +37,8 @@ Current project status:
 * Fastify receives a provider-neutral chat request.
 * The route goes through an `LLMProvider` abstraction.
 * `OllamaProvider` calls local Ollama.
+* Ollama calls have a configurable timeout and return a distinct gateway timeout error.
+* The gateway closes gracefully on `SIGINT` and `SIGTERM`.
 * A successful response currently looks like:
 
 ```json

@@ -2,6 +2,7 @@ import {
   ProviderConnectionError,
   ProviderHttpError,
   ProviderResponseError,
+  ProviderTimeoutError,
 } from "../errors.js";
 import type { ChatRequest, ChatResponse } from "../types/chat.js";
 import type { LLMProvider } from "./provider.js";
@@ -16,8 +17,19 @@ interface OllamaChatResponse {
 export class OllamaProvider implements LLMProvider {
   private readonly chatUrl: URL;
 
-  public constructor(baseUrl: string) {
+  public constructor(
+    baseUrl: string,
+    private readonly requestTimeoutMs = 120_000,
+  ) {
     const normalizedBaseUrl = baseUrl.endsWith("/") ? baseUrl : `${baseUrl}/`;
+
+    if (
+      !Number.isInteger(requestTimeoutMs) ||
+      requestTimeoutMs < 1 ||
+      requestTimeoutMs > 2_147_483_647
+    ) {
+      throw new Error("Ollama request timeout must be a positive integer");
+    }
 
     try {
       this.chatUrl = new URL("api/chat", normalizedBaseUrl);
@@ -28,6 +40,7 @@ export class OllamaProvider implements LLMProvider {
 
   public async chat(request: ChatRequest): Promise<ChatResponse> {
     let response: Response;
+    const signal = AbortSignal.timeout(this.requestTimeoutMs);
 
     try {
       response = await fetch(this.chatUrl, {
@@ -40,13 +53,23 @@ export class OllamaProvider implements LLMProvider {
           messages: request.messages,
           stream: false,
         }),
+        signal,
       });
     } catch (cause) {
+      if (signal.aborted) {
+        throw new ProviderTimeoutError("Ollama", this.requestTimeoutMs, cause);
+      }
+
       throw new ProviderConnectionError("Ollama", cause);
     }
 
     if (!response.ok) {
       const detail = await readErrorDetail(response);
+
+      if (signal.aborted) {
+        throw new ProviderTimeoutError("Ollama", this.requestTimeoutMs, signal.reason);
+      }
+
       throw new ProviderHttpError("Ollama", response.status, detail);
     }
 
@@ -55,6 +78,10 @@ export class OllamaProvider implements LLMProvider {
     try {
       data = (await response.json()) as OllamaChatResponse;
     } catch (cause) {
+      if (signal.aborted) {
+        throw new ProviderTimeoutError("Ollama", this.requestTimeoutMs, cause);
+      }
+
       throw new ProviderResponseError("Ollama", cause);
     }
 
