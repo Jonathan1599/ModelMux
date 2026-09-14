@@ -1,10 +1,10 @@
 import type { Redis } from "ioredis";
-import { RateLimiterUnavailableError } from "../errors.js";
+import { RateLimiterUnavailableError } from "../errors";
 import type {
   RateLimitDecision,
   RateLimiter,
   RateLimitPolicy,
-} from "./rate-limiter.js";
+} from "./rate-limiter";
 
 const TOKEN_BUCKET_SCRIPT = `
 local key = KEYS[1]

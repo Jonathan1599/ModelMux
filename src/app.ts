@@ -4,12 +4,12 @@ import fastify, {
   type FastifyInstance,
   type FastifyServerOptions,
 } from "fastify";
-import type { ApiKeyAuthenticator } from "./auth/api-keys.js";
-import { configureApiKeyGuard } from "./auth/guard.js";
-import { AppError } from "./errors.js";
-import type { LLMProvider } from "./providers/provider.js";
-import type { RateLimiter } from "./rate-limit/rate-limiter.js";
-import { chatRoutes } from "./routes/chat.js";
+import type { ApiKeyAuthenticator } from "./auth/api-keys";
+import { configureApiKeyGuard } from "./auth/guard";
+import { AppError } from "./errors";
+import type { LLMProvider } from "./providers/provider";
+import type { RateLimiter } from "./rate-limit/rate-limiter";
+import { chatRoutes } from "./routes/chat";
 
 export interface BuildAppOptions {
   provider: LLMProvider;

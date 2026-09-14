@@ -1,11 +1,11 @@
 import { Redis } from "ioredis";
 import pg from "pg";
-import { buildApp } from "./app.js";
-import { PostgresApiKeyStore } from "./auth/postgres-api-key-store.js";
-import { StoredApiKeyAuthenticator } from "./auth/api-keys.js";
-import { loadConfig } from "./config.js";
-import { OllamaProvider } from "./providers/ollama.js";
-import { RedisTokenBucket } from "./rate-limit/redis-token-bucket.js";
+import { buildApp } from "./app";
+import { PostgresApiKeyStore } from "./auth/postgres-api-key-store";
+import { StoredApiKeyAuthenticator } from "./auth/api-keys";
+import { loadConfig } from "./config";
+import { OllamaProvider } from "./providers/ollama";
+import { RedisTokenBucket } from "./rate-limit/redis-token-bucket";
 
 const { Pool } = pg;
 

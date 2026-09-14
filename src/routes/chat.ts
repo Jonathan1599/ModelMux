@@ -1,6 +1,6 @@
 import type { FastifyPluginAsync, FastifySchema } from "fastify";
-import type { LLMProvider } from "../providers/provider.js";
-import type { ChatRequest, ChatResponse } from "../types/chat.js";
+import type { LLMProvider } from "../providers/provider";
+import type { ChatRequest, ChatResponse } from "../types/chat";
 
 export interface ChatRoutesOptions {
   provider: LLMProvider;

@@ -5,12 +5,12 @@ import {
   StoredApiKeyAuthenticator,
   type ApiKeyPrincipal,
   type ApiKeyStore,
-} from "../src/auth/api-keys.js";
-import { PostgresApiKeyStore } from "../src/auth/postgres-api-key-store.js";
+} from "../src/auth/api-keys";
+import { PostgresApiKeyStore } from "../src/auth/postgres-api-key-store";
 import {
   ApiKeyStoreUnavailableError,
   AuthenticationError,
-} from "../src/errors.js";
+} from "../src/errors";
 import type { Pool } from "pg";
 
 const principal: ApiKeyPrincipal = {

@@ -1,6 +1,6 @@
 import type { Pool } from "pg";
-import { ApiKeyStoreUnavailableError } from "../errors.js";
-import type { ApiKeyPrincipal, ApiKeyStore } from "./api-keys.js";
+import { ApiKeyStoreUnavailableError } from "../errors";
+import type { ApiKeyPrincipal, ApiKeyStore } from "./api-keys";
 
 interface ApiKeyRow {
   id: string;

@@ -5,9 +5,9 @@ import {
   ProviderHttpError,
   ProviderResponseError,
   ProviderTimeoutError,
-} from "../src/errors.js";
-import { OllamaProvider } from "../src/providers/ollama.js";
-import type { ChatRequest } from "../src/types/chat.js";
+} from "../src/errors";
+import { OllamaProvider } from "../src/providers/ollama";
+import type { ChatRequest } from "../src/types/chat";
 
 const request: ChatRequest = {
   model: "llama3.2",

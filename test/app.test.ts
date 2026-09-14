@@ -1,23 +1,23 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { buildApp } from "../src/app.js";
+import { buildApp } from "../src/app";
 import type {
   ApiKeyAuthenticator,
   ApiKeyPrincipal,
-} from "../src/auth/api-keys.js";
+} from "../src/auth/api-keys";
 import {
   AuthenticationError,
   ProviderConnectionError,
   ProviderHttpError,
   ProviderTimeoutError,
-} from "../src/errors.js";
-import type { LLMProvider } from "../src/providers/provider.js";
+} from "../src/errors";
+import type { LLMProvider } from "../src/providers/provider";
 import type {
   RateLimitDecision,
   RateLimiter,
   RateLimitPolicy,
-} from "../src/rate-limit/rate-limiter.js";
-import type { ChatRequest, ChatResponse } from "../src/types/chat.js";
+} from "../src/rate-limit/rate-limiter";
+import type { ChatRequest, ChatResponse } from "../src/types/chat";
 
 const authorizationHeaders = { authorization: "Bearer test-api-key" };
 const testPrincipal: ApiKeyPrincipal = {

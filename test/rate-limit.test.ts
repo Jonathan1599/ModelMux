@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { Redis } from "ioredis";
-import { RateLimiterUnavailableError } from "../src/errors.js";
-import { RedisTokenBucket } from "../src/rate-limit/redis-token-bucket.js";
+import { RateLimiterUnavailableError } from "../src/errors";
+import { RedisTokenBucket } from "../src/rate-limit/redis-token-bucket";
 
 test("Redis token bucket scopes state by API key and returns its decision", async () => {
   let receivedArguments: unknown[] | undefined;

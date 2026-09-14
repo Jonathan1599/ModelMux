@@ -1,25 +1,30 @@
 import { randomBytes, randomUUID } from "node:crypto";
 import pg from "pg";
-import { hashApiKey } from "../auth/api-keys.js";
-import { loadConfig } from "../config.js";
+import { hashApiKey } from "../auth/api-keys";
+import { loadConfig } from "../config";
 
 const { Pool } = pg;
-const [name, capacityInput = "10", refillInput = "1"] = process.argv.slice(2);
 
-if (!name?.trim()) {
-  console.error(
-    "Usage: npm run api-key:create -- <name> [capacity] [refill-per-second]",
-  );
-  process.exitCode = 1;
-} else {
-  const capacity = parseCapacity(capacityInput);
-  const refillPerSecond = parseRefillRate(refillInput);
-  const rawApiKey = `mm_${randomBytes(32).toString("base64url")}`;
-  const keyPrefix = rawApiKey.slice(0, 12);
+async function main(): Promise<void> {
+  const [name, capacityInput = "10", refillInput = "1"] = process.argv.slice(2);
+
+  if (!name?.trim()) {
+    console.error(
+      "Usage: npm run api-key:create -- <name> [capacity] [refill-per-second]",
+    );
+    process.exitCode = 1;
+    return;
+  }
+
   const config = loadConfig();
   const pool = new Pool({ connectionString: config.databaseUrl });
 
   try {
+    const capacity = parseCapacity(capacityInput);
+    const refillPerSecond = parseRefillRate(refillInput);
+    const rawApiKey = `mm_${randomBytes(32).toString("base64url")}`;
+    const keyPrefix = rawApiKey.slice(0, 12);
+
     await pool.query(
       `INSERT INTO api_keys (
          id,
@@ -48,6 +53,8 @@ if (!name?.trim()) {
     await pool.end();
   }
 }
+
+void main();
 
 function parseCapacity(value: string): number {
   const parsed = Number(value);

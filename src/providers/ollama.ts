@@ -3,9 +3,9 @@ import {
   ProviderHttpError,
   ProviderResponseError,
   ProviderTimeoutError,
-} from "../errors.js";
-import type { ChatRequest, ChatResponse } from "../types/chat.js";
-import type { LLMProvider } from "./provider.js";
+} from "../errors";
+import type { ChatRequest, ChatResponse } from "../types/chat";
+import type { LLMProvider } from "./provider";
 
 interface OllamaChatResponse {
   message?: {

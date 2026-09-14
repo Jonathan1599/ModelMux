@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
-import { AuthenticationError } from "../errors.js";
-import type { RateLimitPolicy } from "../rate-limit/rate-limiter.js";
+import { AuthenticationError } from "../errors";
+import type { RateLimitPolicy } from "../rate-limit/rate-limiter";
 
 export interface ApiKeyPrincipal {
   id: string;

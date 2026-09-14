@@ -1,7 +1,7 @@
 import type { FastifyInstance } from "fastify";
-import { RateLimitExceededError } from "../errors.js";
-import type { RateLimiter } from "../rate-limit/rate-limiter.js";
-import type { ApiKeyAuthenticator, ApiKeyPrincipal } from "./api-keys.js";
+import { RateLimitExceededError } from "../errors";
+import type { RateLimiter } from "../rate-limit/rate-limiter";
+import type { ApiKeyAuthenticator, ApiKeyPrincipal } from "./api-keys";
 
 declare module "fastify" {
   interface FastifyRequest {
