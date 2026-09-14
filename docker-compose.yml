@@ -6,10 +6,17 @@ services:
       PORT: 3000
       OLLAMA_BASE_URL: http://ollama:11434
       OLLAMA_REQUEST_TIMEOUT_MS: 120000
+      DATABASE_URL: postgresql://modelmux:modelmux@postgres:5432/modelmux
+      REDIS_URL: redis://redis:6379
     ports:
       - "3000:3000"
     depends_on:
-      - ollama
+      ollama:
+        condition: service_started
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
 
   ollama:
     image: ollama/ollama:latest
@@ -18,5 +25,36 @@ services:
     volumes:
       - ollama-data:/root/.ollama
 
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: modelmux
+      POSTGRES_USER: modelmux
+      POSTGRES_PASSWORD: modelmux
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./db/migrations:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U modelmux -d modelmux"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
+
 volumes:
   ollama-data:
+  postgres-data:
+  redis-data:

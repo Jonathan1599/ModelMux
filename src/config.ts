@@ -4,6 +4,8 @@ export interface Config {
   port: number;
   ollamaBaseUrl: string;
   ollamaRequestTimeoutMs: number;
+  databaseUrl: string;
+  redisUrl: string;
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
@@ -13,10 +15,22 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     env.OLLAMA_REQUEST_TIMEOUT_MS ?? "120000",
     "OLLAMA_REQUEST_TIMEOUT_MS",
   );
+  const databaseUrl =
+    env.DATABASE_URL?.trim() ||
+    "postgresql://modelmux:modelmux@localhost:5432/modelmux";
+  const redisUrl = env.REDIS_URL?.trim() || "redis://localhost:6379";
 
   validateUrl(ollamaBaseUrl, "OLLAMA_BASE_URL");
+  validateUrl(databaseUrl, "DATABASE_URL", ["postgres:", "postgresql:"]);
+  validateUrl(redisUrl, "REDIS_URL", ["redis:", "rediss:"]);
 
-  return { port, ollamaBaseUrl, ollamaRequestTimeoutMs };
+  return {
+    port,
+    ollamaBaseUrl,
+    ollamaRequestTimeoutMs,
+    databaseUrl,
+    redisUrl,
+  };
 }
 
 function parsePort(value: string): number {
@@ -39,7 +53,11 @@ function parsePositiveInteger(value: string, name: string): number {
   return parsed;
 }
 
-function validateUrl(value: string, name: string): void {
+function validateUrl(
+  value: string,
+  name: string,
+  allowedProtocols: string[] = ["http:", "https:"],
+): void {
   let url: URL;
 
   try {
@@ -48,7 +66,9 @@ function validateUrl(value: string, name: string): void {
     throw new Error(`${name} must be a valid URL; received ${value}`);
   }
 
-  if (url.protocol !== "http:" && url.protocol !== "https:") {
-    throw new Error(`${name} must use http or https; received ${value}`);
+  if (!allowedProtocols.includes(url.protocol)) {
+    throw new Error(
+      `${name} must use ${allowedProtocols.join(" or ")}; received ${value}`,
+    );
   }
 }

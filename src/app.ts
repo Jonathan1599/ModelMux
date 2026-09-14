@@ -4,17 +4,24 @@ import fastify, {
   type FastifyInstance,
   type FastifyServerOptions,
 } from "fastify";
+import type { ApiKeyAuthenticator } from "./auth/api-keys.js";
+import { configureApiKeyGuard } from "./auth/guard.js";
 import { AppError } from "./errors.js";
 import type { LLMProvider } from "./providers/provider.js";
+import type { RateLimiter } from "./rate-limit/rate-limiter.js";
 import { chatRoutes } from "./routes/chat.js";
 
 export interface BuildAppOptions {
   provider: LLMProvider;
+  apiKeyAuthenticator: ApiKeyAuthenticator;
+  rateLimiter: RateLimiter;
   logger?: FastifyServerOptions["logger"];
 }
 
 export function buildApp({
   provider,
+  apiKeyAuthenticator,
+  rateLimiter,
   logger = { level: "info" },
 }: BuildAppOptions): FastifyInstance {
   const app = fastify({
@@ -28,7 +35,13 @@ export function buildApp({
   });
 
   app.get("/health", async () => ({ status: "ok" }));
-  void app.register(chatRoutes, { provider });
+  void app.register(async (protectedApp) => {
+    configureApiKeyGuard(protectedApp, {
+      authenticator: apiKeyAuthenticator,
+      rateLimiter,
+    });
+    await protectedApp.register(chatRoutes, { provider });
+  });
 
   app.setErrorHandler<FastifyError>((error, request, reply) => {
     if (error.validation) {
@@ -47,7 +60,15 @@ export function buildApp({
     }
 
     if (error instanceof AppError) {
-      request.log.error({ err: error, code: error.code }, "Provider request failed");
+      const logContext = { err: error, code: error.code };
+
+      if (error.statusCode >= 500) {
+        request.log.error(logContext, "Request failed");
+      } else {
+        request.log.warn(logContext, "Request rejected");
+      }
+
+      void reply.headers(error.headers);
       void reply.status(error.statusCode).send({
         error: {
           code: error.code,

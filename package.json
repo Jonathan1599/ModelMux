@@ -12,6 +12,8 @@
     "dev": "tsx watch src/server.ts",
     "build": "tsc -p tsconfig.json",
     "start": "node dist/server.js",
+    "db:migrate": "tsx src/scripts/migrate.ts",
+    "api-key:create": "tsx src/scripts/create-api-key.ts",
     "test": "node --import tsx --test test/*.test.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json",
     "check": "npm run typecheck && npm test"
@@ -19,10 +21,13 @@
   "dependencies": {
     "dotenv": "^16.4.7",
     "fastify": "^5.2.1",
+    "ioredis": "^6.0.0",
+    "pg": "^8.23.0",
     "pino": "^9.6.0"
   },
   "devDependencies": {
     "@types/node": "^22.10.5",
+    "@types/pg": "^8.23.1",
     "tsx": "^4.19.2",
     "typescript": "^5.7.2"
   }

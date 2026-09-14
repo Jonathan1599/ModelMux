@@ -1,12 +1,16 @@
 # ModelMux
 
-This milestone is a small HTTP gateway that exposes a provider-neutral chat API and forwards requests to a local Ollama instance. It uses Fastify for HTTP and validation, Pino for structured logs, and native `fetch` for the Ollama call.
+ModelMux is a provider-agnostic LLM inference gateway built with Node.js, TypeScript, and Fastify. It currently authenticates clients with API keys, applies a distributed per-key token bucket, and forwards non-streaming chat requests to Ollama.
 
 ## Architecture
 
 ```text
 Client
   -> POST /v1/chat
+  -> Bearer API key authentication
+       -> SHA-256 key hash lookup in Postgres
+       -> per-key capacity and refill policy
+  -> atomic Redis token bucket
   -> Fastify schema validation
   -> LLMProvider interface
   -> OllamaProvider
@@ -14,52 +18,52 @@ Client
   -> provider-neutral ChatResponse
 ```
 
-`GET /health` only reports that the gateway process is running. It does not contact Ollama in this milestone.
+`GET /health` is public and only reports that the gateway process is running. It does not check Postgres, Redis, or Ollama.
+
+API keys are generated with 256 bits of randomness. Only their SHA-256 hashes and short display prefixes are stored in Postgres. The full key is printed once when it is created.
+
+Rate-limit policies are stored per API key:
+
+- `capacity` controls the maximum burst size.
+- `refill-per-second` controls the sustained request rate.
+- Redis evaluates each request atomically using its own server clock.
+
+The gateway fails closed when the API-key store or rate limiter is unavailable. Authentication and rate limiting apply only to `/v1/chat`.
 
 ## Run with Docker Compose
 
-Start Ollama, then pull the model once into its persistent Docker volume:
+Build and start the gateway, Postgres, Redis, and Ollama:
 
 ```bash
-docker compose up -d ollama
+docker compose up -d --build
+```
+
+Pull the model into Ollama's persistent volume:
+
+```bash
 docker compose exec ollama ollama pull llama3.2
 ```
 
-Build and start the gateway:
+Run the idempotent database migration, then create an API key with a burst capacity of 10 requests and a refill rate of 1 request per second:
 
 ```bash
-docker compose up --build gateway
+docker compose exec gateway node dist/scripts/migrate.js
+docker compose exec gateway node dist/scripts/create-api-key.js local-dev 10 1
 ```
 
-Ollama model download is deliberately a separate command so gateway startup is predictable and does not depend on a long model pull.
+Save the `mm_...` key printed by the second command. It cannot be recovered from the database later.
 
-## Run directly on the host
-
-Node.js 20 or newer and a local [Ollama](https://ollama.com/) installation are required.
-
-In one terminal, start Ollama:
-
-```bash
-ollama serve
-```
-
-In a second terminal, pull the model, install dependencies, and run the gateway:
-
-```bash
-ollama pull llama3.2
-npm install
-cp .env.example .env
-npm run dev
-```
-
-`PORT` defaults to `3000`, `OLLAMA_BASE_URL` defaults to `http://localhost:11434`, and `OLLAMA_REQUEST_TIMEOUT_MS` defaults to `120000`. Values from a local `.env` file are loaded when present.
-
-Provider connection failures return `503`, provider timeouts return `504`, and other invalid or unsuccessful provider responses return `502`. Public error responses do not include upstream response details.
+Postgres also runs SQL from `db/migrations` automatically when its data volume is first created. The explicit migration command makes setup work with an existing volume as well.
 
 ## Call the API
 
+Replace the value below with the key returned by the creation command:
+
 ```bash
+API_KEY='mm_your_key_here'
+
 curl --request POST http://localhost:3000/v1/chat \
+  --header "authorization: Bearer ${API_KEY}" \
   --header 'content-type: application/json' \
   --data '{
     "model": "llama3.2",
@@ -72,7 +76,7 @@ curl --request POST http://localhost:3000/v1/chat \
   }'
 ```
 
-The response has a provider-neutral shape:
+A successful response has a provider-neutral shape:
 
 ```json
 {
@@ -83,39 +87,90 @@ The response has a provider-neutral shape:
 }
 ```
 
+Rate-limited requests return `429` and include `Retry-After`, `X-RateLimit-Limit`, and `X-RateLimit-Remaining` headers.
+
+## Run the gateway on the host
+
+Node.js 20 or newer is required. If Postgres is already installed locally, start only Redis and Ollama with Docker, then point `DATABASE_URL` in `.env` at the existing Postgres instance:
+
+```bash
+docker compose up -d redis ollama
+docker compose exec ollama ollama pull llama3.2
+npm install
+cp .env.example .env
+# Edit DATABASE_URL in .env if your local credentials differ from the default.
+npm run db:migrate
+npm run api-key:create -- local-dev 10 1
+npm run dev
+```
+
+The final three arguments to `api-key:create` are the key name, burst capacity, and tokens refilled per second.
+
+## Configuration
+
+| Variable | Local default | Purpose |
+| --- | --- | --- |
+| `PORT` | `3000` | Gateway listen port |
+| `OLLAMA_BASE_URL` | `http://localhost:11434` | Ollama server URL |
+| `OLLAMA_REQUEST_TIMEOUT_MS` | `120000` | Maximum non-streaming Ollama request duration |
+| `DATABASE_URL` | `postgresql://modelmux:modelmux@localhost:5432/modelmux` | API-key metadata store |
+| `REDIS_URL` | `redis://localhost:6379` | Shared token-bucket state |
+
+Values from a local `.env` file are loaded when present.
+
+## HTTP errors
+
+| Status | Code | Meaning |
+| --- | --- | --- |
+| `400` | `VALIDATION_ERROR` | The request body failed schema validation |
+| `401` | `INVALID_API_KEY` | The bearer API key is missing, malformed, disabled, or unknown |
+| `429` | `RATE_LIMIT_EXCEEDED` | The API key has exhausted its token bucket |
+| `502` | `PROVIDER_ERROR` | Ollama returned an unsuccessful response |
+| `502` | `INVALID_PROVIDER_RESPONSE` | Ollama returned a malformed successful response |
+| `503` | `API_KEY_STORE_UNAVAILABLE` | Postgres could not authenticate the request |
+| `503` | `RATE_LIMITER_UNAVAILABLE` | Redis could not evaluate the request |
+| `503` | `PROVIDER_UNAVAILABLE` | The gateway could not connect to Ollama |
+| `504` | `PROVIDER_TIMEOUT` | Ollama exceeded its configured timeout |
+
+Error responses include the request ID. Upstream response details remain in structured logs and are not returned to clients.
+
 ## Development commands
 
 ```bash
 npm test
 npm run typecheck
 npm run build
-npm start
+npm run check
 ```
 
 ## Project structure
 
 ```text
 .
+├── db/migrations              # Idempotent Postgres schema
 ├── src
 │   ├── app.ts                 # Fastify app factory and error handling
 │   ├── config.ts              # Environment configuration
-│   ├── errors.ts              # Application/provider errors
+│   ├── errors.ts              # Stable application errors
 │   ├── server.ts              # Runtime composition and listener
+│   ├── auth
+│   │   ├── api-keys.ts        # Key hashing and authentication contract
+│   │   ├── guard.ts           # Protected-route authentication and limiting
+│   │   └── postgres-api-key-store.ts
 │   ├── providers
 │   │   ├── ollama.ts          # Ollama HTTP adapter
 │   │   └── provider.ts        # Provider interface
-│   ├── routes
-│   │   └── chat.ts            # Provider-neutral chat route and schema
-│   └── types
-│       └── chat.ts            # Provider-neutral request/response types
-├── test
-│   ├── app.test.ts
-│   └── ollama.test.ts
+│   ├── rate-limit
+│   │   ├── rate-limiter.ts    # Provider-neutral limiter contract
+│   │   └── redis-token-bucket.ts
+│   ├── routes/chat.ts         # Chat route and request schema
+│   ├── scripts               # Migration and API-key commands
+│   └── types/chat.ts          # Chat request/response types
+├── test                       # Injection and unit tests
 ├── Dockerfile
 ├── docker-compose.yml
 ├── package.json
-├── tsconfig.json
 └── .env.example
 ```
 
-Redis, queues, caching, rate limiting, provider failover, streaming, authentication, metrics, dashboards, and broader observability are intentionally deferred to later milestones.
+Queues, BullMQ workers, caching, concurrency limiting, provider failover, circuit breakers, streaming, Prometheus, Grafana, pgvector, and load testing remain intentionally deferred to later milestones.

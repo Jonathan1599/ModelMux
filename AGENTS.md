@@ -39,6 +39,9 @@ Current project status:
 * `OllamaProvider` calls local Ollama.
 * Ollama calls have a configurable timeout and return a distinct gateway timeout error.
 * The gateway closes gracefully on `SIGINT` and `SIGTERM`.
+* `POST /v1/chat` requires a bearer API key.
+* API-key hashes and per-key rate-limit policies are stored in Postgres.
+* Redis enforces an atomic per-key token bucket and returns `429` with `Retry-After` when exhausted.
 * A successful response currently looks like:
 
 ```json
@@ -54,6 +57,7 @@ The first working test request was:
 
 ```bash
 curl --request POST http://localhost:3000/v1/chat \
+  --header "authorization: Bearer ${API_KEY}" \
   --header 'content-type: application/json' \
   --data '{
     "model": "llama3.2",
@@ -121,6 +125,8 @@ Already substantially complete:
 * tests
 
 ### Milestone 2 — Authentication and rate limiting
+
+Substantially complete:
 
 * API keys
 * store hashed keys
@@ -235,6 +241,7 @@ How I want you to work with me:
 * Keep explanations concise but technical.
 * When modifying code, inspect the existing repository first.
 * Preserve working code unless there is a reason to change it.
+* This development machine already has a local Postgres installation. Do not start, stop, replace, or otherwise manage Postgres through Docker on this machine; use the configured local `DATABASE_URL` for local verification.
 * Prefer incremental diffs over large rewrites.
 * Run tests/typecheck after changes.
 * Call out failures or questionable design decisions instead of hiding them.

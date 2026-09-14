@@ -1,10 +1,16 @@
+interface AppErrorOptions extends ErrorOptions {
+  headers?: Readonly<Record<string, string>>;
+}
+
 export abstract class AppError extends Error {
   public abstract readonly statusCode: number;
   public abstract readonly code: string;
+  public readonly headers: Readonly<Record<string, string>>;
 
-  protected constructor(message: string, options?: ErrorOptions) {
+  protected constructor(message: string, options: AppErrorOptions = {}) {
     super(message, options);
     this.name = new.target.name;
+    this.headers = options.headers ?? {};
   }
 }
 
@@ -49,5 +55,45 @@ export class ProviderTimeoutError extends AppError {
     cause?: unknown,
   ) {
     super(`${provider} request timed out`, { cause });
+  }
+}
+
+export class AuthenticationError extends AppError {
+  public readonly statusCode = 401;
+  public readonly code = "INVALID_API_KEY";
+
+  public constructor() {
+    super("Missing or invalid API key", {
+      headers: { "www-authenticate": 'Bearer realm="modelmux"' },
+    });
+  }
+}
+
+export class ApiKeyStoreUnavailableError extends AppError {
+  public readonly statusCode = 503;
+  public readonly code = "API_KEY_STORE_UNAVAILABLE";
+
+  public constructor(cause?: unknown) {
+    super("API key service is unavailable", { cause });
+  }
+}
+
+export class RateLimitExceededError extends AppError {
+  public readonly statusCode = 429;
+  public readonly code = "RATE_LIMIT_EXCEEDED";
+
+  public constructor(public readonly retryAfterSeconds: number) {
+    super("Rate limit exceeded", {
+      headers: { "retry-after": String(retryAfterSeconds) },
+    });
+  }
+}
+
+export class RateLimiterUnavailableError extends AppError {
+  public readonly statusCode = 503;
+  public readonly code = "RATE_LIMITER_UNAVAILABLE";
+
+  public constructor(cause?: unknown) {
+    super("Rate limiter is unavailable", { cause });
   }
 }
