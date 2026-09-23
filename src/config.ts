@@ -6,6 +6,9 @@ export interface Config {
   ollamaRequestTimeoutMs: number;
   databaseUrl: string;
   redisUrl: string;
+  providerMaxConcurrency: number;
+  providerMaxQueueSize: number;
+  providerQueueTimeoutMs: number;
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
@@ -19,6 +22,18 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     env.DATABASE_URL?.trim() ||
     "postgresql://modelmux:modelmux@localhost:5432/modelmux";
   const redisUrl = env.REDIS_URL?.trim() || "redis://localhost:6379";
+  const providerMaxConcurrency = parsePositiveInteger(
+    env.PROVIDER_MAX_CONCURRENCY ?? "2",
+    "PROVIDER_MAX_CONCURRENCY",
+  );
+  const providerMaxQueueSize = parseNonNegativeInteger(
+    env.PROVIDER_MAX_QUEUE_SIZE ?? "20",
+    "PROVIDER_MAX_QUEUE_SIZE",
+  );
+  const providerQueueTimeoutMs = parsePositiveInteger(
+    env.PROVIDER_QUEUE_TIMEOUT_MS ?? "30000",
+    "PROVIDER_QUEUE_TIMEOUT_MS",
+  );
 
   validateUrl(ollamaBaseUrl, "OLLAMA_BASE_URL");
   validateUrl(databaseUrl, "DATABASE_URL", ["postgres:", "postgresql:"]);
@@ -30,6 +45,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     ollamaRequestTimeoutMs,
     databaseUrl,
     redisUrl,
+    providerMaxConcurrency,
+    providerMaxQueueSize,
+    providerQueueTimeoutMs,
   };
 }
 
@@ -48,6 +66,16 @@ function parsePositiveInteger(value: string, name: string): number {
 
   if (!Number.isInteger(parsed) || parsed < 1 || parsed > 2_147_483_647) {
     throw new Error(`${name} must be a positive integer; received ${value}`);
+  }
+
+  return parsed;
+}
+
+function parseNonNegativeInteger(value: string, name: string): number {
+  const parsed = Number(value);
+
+  if (!Number.isInteger(parsed) || parsed < 0 || parsed > 2_147_483_647) {
+    throw new Error(`${name} must be a non-negative integer; received ${value}`);
   }
 
   return parsed;

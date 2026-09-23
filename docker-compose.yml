@@ -8,6 +8,9 @@ services:
       OLLAMA_REQUEST_TIMEOUT_MS: 120000
       DATABASE_URL: postgresql://modelmux:modelmux@postgres:5432/modelmux
       REDIS_URL: redis://redis:6379
+      PROVIDER_MAX_CONCURRENCY: 2
+      PROVIDER_MAX_QUEUE_SIZE: 20
+      PROVIDER_QUEUE_TIMEOUT_MS: 30000
     ports:
       - "3000:3000"
     depends_on:

@@ -4,6 +4,7 @@ import { buildApp } from "./app";
 import { PostgresApiKeyStore } from "./auth/postgres-api-key-store";
 import { StoredApiKeyAuthenticator } from "./auth/api-keys";
 import { loadConfig } from "./config";
+import { InMemoryConcurrencyLimiter } from "./concurrency/in-memory-concurrency-limiter";
 import { OllamaProvider } from "./providers/ollama";
 import { RedisTokenBucket } from "./rate-limit/redis-token-bucket";
 
@@ -18,11 +19,21 @@ const redis = new Redis(config.redisUrl, {
 const apiKeyStore = new PostgresApiKeyStore(pool);
 const apiKeyAuthenticator = new StoredApiKeyAuthenticator(apiKeyStore);
 const rateLimiter = new RedisTokenBucket(redis);
+const concurrencyLimiter = new InMemoryConcurrencyLimiter({
+  maxConcurrent: config.providerMaxConcurrency,
+  maxQueueSize: config.providerMaxQueueSize,
+  waitTimeoutMs: config.providerQueueTimeoutMs,
+});
 const provider = new OllamaProvider(
   config.ollamaBaseUrl,
   config.ollamaRequestTimeoutMs,
 );
-const app = buildApp({ provider, apiKeyAuthenticator, rateLimiter });
+const app = buildApp({
+  provider,
+  apiKeyAuthenticator,
+  rateLimiter,
+  concurrencyLimiter,
+});
 let isShuttingDown = false;
 
 pool.on("error", (error) => {

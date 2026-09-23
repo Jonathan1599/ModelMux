@@ -97,3 +97,28 @@ export class RateLimiterUnavailableError extends AppError {
     super("Rate limiter is unavailable", { cause });
   }
 }
+
+export class ConcurrencyQueueFullError extends AppError {
+  public readonly statusCode = 503;
+  public readonly code = "CONCURRENCY_QUEUE_FULL";
+
+  public constructor(
+    public readonly maxConcurrent: number,
+    public readonly maxQueueSize: number,
+  ) {
+    super("Provider execution queue is full", {
+      headers: { "retry-after": "1" },
+    });
+  }
+}
+
+export class ConcurrencyWaitTimeoutError extends AppError {
+  public readonly statusCode = 503;
+  public readonly code = "CONCURRENCY_WAIT_TIMEOUT";
+
+  public constructor(public readonly waitTimeoutMs: number) {
+    super("Timed out waiting for provider capacity", {
+      headers: { "retry-after": "1" },
+    });
+  }
+}

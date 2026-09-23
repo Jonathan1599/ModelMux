@@ -42,6 +42,8 @@ Current project status:
 * `POST /v1/chat` requires a bearer API key.
 * API-key hashes and per-key rate-limit policies are stored in Postgres.
 * Redis enforces an atomic per-key token bucket and returns `429` with `Retry-After` when exhausted.
+* A bounded, process-local FIFO concurrency limiter protects Ollama execution separately from per-key request rate limiting.
+* Provider queue overflow and wait timeout return `503`; successful admissions log queue wait and occupancy values.
 * A successful response currently looks like:
 
 ```json
@@ -138,6 +140,8 @@ Substantially complete:
 * limiter tests
 
 ### Milestone 3 — Execution protection
+
+Substantially complete:
 
 * provider/global concurrency limits
 * clearly separate concurrency control from request rate limiting

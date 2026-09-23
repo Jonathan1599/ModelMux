@@ -1,6 +1,6 @@
 # ModelMux
 
-ModelMux is a provider-agnostic LLM inference gateway built with Node.js, TypeScript, and Fastify. It currently authenticates clients with API keys, applies a distributed per-key token bucket, and forwards non-streaming chat requests to Ollama.
+ModelMux is a provider-agnostic LLM inference gateway built with Node.js, TypeScript, and Fastify. It currently authenticates clients with API keys, applies a distributed per-key token bucket, bounds concurrent provider execution, and forwards non-streaming chat requests to Ollama.
 
 ## Architecture
 
@@ -12,6 +12,7 @@ Client
        -> per-key capacity and refill policy
   -> atomic Redis token bucket
   -> Fastify schema validation
+  -> bounded provider execution queue
   -> LLMProvider interface
   -> OllamaProvider
   -> Ollama POST /api/chat (stream: false)
@@ -29,6 +30,17 @@ Rate-limit policies are stored per API key:
 - Redis evaluates each request atomically using its own server clock.
 
 The gateway fails closed when the API-key store or rate limiter is unavailable. Authentication and rate limiting apply only to `/v1/chat`.
+
+Provider execution is protected separately by a process-local concurrency limiter:
+
+- `PROVIDER_MAX_CONCURRENCY` controls active Ollama calls.
+- `PROVIDER_MAX_QUEUE_SIZE` bounds the number of synchronous requests waiting for a slot.
+- `PROVIDER_QUEUE_TIMEOUT_MS` bounds how long a request can wait.
+- Queue overflow and wait timeout return `503` with `Retry-After`.
+
+The wait queue is FIFO, bounded, and held only in gateway memory. It absorbs short bursts but is not a durable job queue. With multiple gateway replicas, each replica has its own limit, so aggregate provider concurrency is the per-replica limit multiplied by the number of replicas. A distributed limit should be considered only when ModelMux actually adopts multi-replica deployment.
+
+Successful admissions emit structured fields for queue wait time, active executions, and queued requests. The limiter also tracks admitted, rejected, timed-out, total-wait, and maximum-wait values for the later metrics milestone.
 
 ## Run with Docker Compose
 
@@ -115,6 +127,9 @@ The final three arguments to `api-key:create` are the key name, burst capacity, 
 | `OLLAMA_REQUEST_TIMEOUT_MS` | `120000` | Maximum non-streaming Ollama request duration |
 | `DATABASE_URL` | `postgresql://modelmux:modelmux@localhost:5432/modelmux` | API-key metadata store |
 | `REDIS_URL` | `redis://localhost:6379` | Shared token-bucket state |
+| `PROVIDER_MAX_CONCURRENCY` | `2` | Maximum active provider calls in this gateway process |
+| `PROVIDER_MAX_QUEUE_SIZE` | `20` | Maximum synchronous requests waiting for provider capacity |
+| `PROVIDER_QUEUE_TIMEOUT_MS` | `30000` | Maximum time a request may wait for provider capacity |
 
 Values from a local `.env` file are loaded when present.
 
@@ -130,6 +145,8 @@ Values from a local `.env` file are loaded when present.
 | `503` | `API_KEY_STORE_UNAVAILABLE` | Postgres could not authenticate the request |
 | `503` | `RATE_LIMITER_UNAVAILABLE` | Redis could not evaluate the request |
 | `503` | `PROVIDER_UNAVAILABLE` | The gateway could not connect to Ollama |
+| `503` | `CONCURRENCY_QUEUE_FULL` | The bounded provider wait queue is full |
+| `503` | `CONCURRENCY_WAIT_TIMEOUT` | A request waited too long for provider capacity |
 | `504` | `PROVIDER_TIMEOUT` | Ollama exceeded its configured timeout |
 
 Error responses include the request ID. Upstream response details remain in structured logs and are not returned to clients.
@@ -157,6 +174,9 @@ npm run check
 │   │   ├── api-keys.ts        # Key hashing and authentication contract
 │   │   ├── guard.ts           # Protected-route authentication and limiting
 │   │   └── postgres-api-key-store.ts
+│   ├── concurrency
+│   │   ├── concurrency-limiter.ts
+│   │   └── in-memory-concurrency-limiter.ts
 │   ├── providers
 │   │   ├── ollama.ts          # Ollama HTTP adapter
 │   │   └── provider.ts        # Provider interface
@@ -173,4 +193,4 @@ npm run check
 └── .env.example
 ```
 
-Queues, BullMQ workers, caching, concurrency limiting, provider failover, circuit breakers, streaming, Prometheus, Grafana, pgvector, and load testing remain intentionally deferred to later milestones.
+Durable queues, BullMQ workers, caching, provider failover, circuit breakers, streaming, Prometheus, Grafana, pgvector, and load testing remain intentionally deferred to later milestones.

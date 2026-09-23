@@ -6,6 +6,7 @@ import fastify, {
 } from "fastify";
 import type { ApiKeyAuthenticator } from "./auth/api-keys";
 import { configureApiKeyGuard } from "./auth/guard";
+import type { ConcurrencyLimiter } from "./concurrency/concurrency-limiter";
 import { AppError } from "./errors";
 import type { LLMProvider } from "./providers/provider";
 import type { RateLimiter } from "./rate-limit/rate-limiter";
@@ -15,6 +16,7 @@ export interface BuildAppOptions {
   provider: LLMProvider;
   apiKeyAuthenticator: ApiKeyAuthenticator;
   rateLimiter: RateLimiter;
+  concurrencyLimiter: ConcurrencyLimiter;
   logger?: FastifyServerOptions["logger"];
 }
 
@@ -22,6 +24,7 @@ export function buildApp({
   provider,
   apiKeyAuthenticator,
   rateLimiter,
+  concurrencyLimiter,
   logger = { level: "info" },
 }: BuildAppOptions): FastifyInstance {
   const app = fastify({
@@ -40,7 +43,7 @@ export function buildApp({
       authenticator: apiKeyAuthenticator,
       rateLimiter,
     });
-    await protectedApp.register(chatRoutes, { provider });
+    await protectedApp.register(chatRoutes, { provider, concurrencyLimiter });
   });
 
   app.setErrorHandler<FastifyError>((error, request, reply) => {

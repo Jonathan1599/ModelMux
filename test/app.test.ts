@@ -5,8 +5,15 @@ import type {
   ApiKeyAuthenticator,
   ApiKeyPrincipal,
 } from "../src/auth/api-keys";
+import type {
+  ConcurrencyLimiter,
+  ConcurrencyPermit,
+  ConcurrencySnapshot,
+} from "../src/concurrency/concurrency-limiter";
+import { InMemoryConcurrencyLimiter } from "../src/concurrency/in-memory-concurrency-limiter";
 import {
   AuthenticationError,
+  ConcurrencyQueueFullError,
   ProviderConnectionError,
   ProviderHttpError,
   ProviderTimeoutError,
@@ -59,11 +66,17 @@ function buildTestApp(
   provider: LLMProvider,
   apiKeyAuthenticator: ApiKeyAuthenticator = new TestAuthenticator(),
   rateLimiter: RateLimiter = new AllowingRateLimiter(),
+  concurrencyLimiter: ConcurrencyLimiter = new InMemoryConcurrencyLimiter({
+    maxConcurrent: 10,
+    maxQueueSize: 10,
+    waitTimeoutMs: 1_000,
+  }),
 ) {
   return buildApp({
     provider,
     apiKeyAuthenticator,
     rateLimiter,
+    concurrencyLimiter,
     logger: false,
   });
 }
@@ -301,3 +314,95 @@ test("POST /v1/chat enforces the API key's rate-limit policy", async (t) => {
   assert.deepEqual(consumedPolicy, testPrincipal.rateLimit);
   assert.equal(providerCalls, 0);
 });
+
+test("POST /v1/chat returns 503 when the concurrency queue is full", async (t) => {
+  let providerCalls = 0;
+  const provider = new StubProvider(async () => {
+    providerCalls += 1;
+    return { message: { role: "assistant", content: "unexpected" } };
+  });
+  const concurrencyLimiter: ConcurrencyLimiter = {
+    async acquire() {
+      throw new ConcurrencyQueueFullError(2, 20);
+    },
+    snapshot() {
+      return emptyConcurrencySnapshot();
+    },
+  };
+  const app = buildTestApp(
+    provider,
+    new TestAuthenticator(),
+    new AllowingRateLimiter(),
+    concurrencyLimiter,
+  );
+  t.after(() => app.close());
+
+  const response = await app.inject({
+    method: "POST",
+    url: "/v1/chat",
+    headers: authorizationHeaders,
+    payload: {
+      model: "llama3.2",
+      messages: [{ role: "user", content: "Hello" }],
+    },
+  });
+
+  assert.equal(response.statusCode, 503);
+  assert.equal(response.json().error.code, "CONCURRENCY_QUEUE_FULL");
+  assert.equal(response.headers["retry-after"], "1");
+  assert.equal(providerCalls, 0);
+});
+
+test("POST /v1/chat releases its concurrency permit after provider failure", async (t) => {
+  let releaseCalls = 0;
+  const provider = new StubProvider(async () => {
+    throw new ProviderConnectionError("Ollama");
+  });
+  const concurrencyLimiter: ConcurrencyLimiter = {
+    async acquire(): Promise<ConcurrencyPermit> {
+      return {
+        waitTimeMs: 0,
+        activeAtAdmission: 1,
+        queuedAtAdmission: 0,
+        release() {
+          releaseCalls += 1;
+        },
+      };
+    },
+    snapshot() {
+      return emptyConcurrencySnapshot();
+    },
+  };
+  const app = buildTestApp(
+    provider,
+    new TestAuthenticator(),
+    new AllowingRateLimiter(),
+    concurrencyLimiter,
+  );
+  t.after(() => app.close());
+
+  const response = await app.inject({
+    method: "POST",
+    url: "/v1/chat",
+    headers: authorizationHeaders,
+    payload: {
+      model: "llama3.2",
+      messages: [{ role: "user", content: "Hello" }],
+    },
+  });
+
+  assert.equal(response.statusCode, 503);
+  assert.equal(releaseCalls, 1);
+});
+
+function emptyConcurrencySnapshot(): ConcurrencySnapshot {
+  return {
+    active: 0,
+    queued: 0,
+    admitted: 0,
+    rejected: 0,
+    timedOut: 0,
+    totalWaitTimeMs: 0,
+    maxWaitTimeMs: 0,
+  };
+}
