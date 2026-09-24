@@ -77,6 +77,10 @@ function buildTestApp(
     apiKeyAuthenticator,
     rateLimiter,
     concurrencyLimiter,
+    jobs: {
+      async enqueue() { throw new Error("Unexpected job submission"); },
+      async getJob() { throw new Error("Unexpected job lookup"); },
+    },
     logger: false,
   });
 }

@@ -7,16 +7,30 @@ import { loadConfig } from "./config";
 import { InMemoryConcurrencyLimiter } from "./concurrency/in-memory-concurrency-limiter";
 import { OllamaProvider } from "./providers/ollama";
 import { RedisTokenBucket } from "./rate-limit/redis-token-bucket";
+import { RabbitMqJobQueue } from "./queue/rabbitmq";
+import { PostgresJobStore } from "./queue/postgres-job-store";
+import type { ChatRequest, ChatResponse } from "./types/chat";
+import { INFERENCE_QUEUE_NAME } from "./jobs/inference-jobs";
 
 const { Pool } = pg;
 
 const config = loadConfig();
-const pool = new Pool({ connectionString: config.databaseUrl });
+const pool = new Pool({
+  connectionString: config.databaseUrl,
+  connectionTimeoutMillis: 5_000,
+  statement_timeout: 10_000,
+});
 const redis = new Redis(config.redisUrl, {
   lazyConnect: true,
   maxRetriesPerRequest: 1,
 });
 const apiKeyStore = new PostgresApiKeyStore(pool);
+const jobStore = new PostgresJobStore<ChatRequest, ChatResponse>(pool, {
+  name: INFERENCE_QUEUE_NAME,
+  maxAttempts: config.jobMaxAttempts,
+  backoffMs: config.jobBackoffMs,
+  leaseMs: config.ollamaRequestTimeoutMs + 30_000,
+});
 const apiKeyAuthenticator = new StoredApiKeyAuthenticator(apiKeyStore);
 const rateLimiter = new RedisTokenBucket(redis);
 const concurrencyLimiter = new InMemoryConcurrencyLimiter({
@@ -33,6 +47,7 @@ const app = buildApp({
   apiKeyAuthenticator,
   rateLimiter,
   concurrencyLimiter,
+  jobs: new RabbitMqJobQueue(jobStore),
 });
 let isShuttingDown = false;
 

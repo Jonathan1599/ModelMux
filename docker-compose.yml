@@ -6,20 +6,61 @@ services:
       PORT: 3000
       OLLAMA_BASE_URL: http://ollama:11434
       OLLAMA_REQUEST_TIMEOUT_MS: 120000
-      DATABASE_URL: postgresql://modelmux:modelmux@postgres:5432/modelmux
+      DATABASE_URL: ${DOCKER_DATABASE_URL:-postgresql://modelmux:modelmux@host.docker.internal:5432/modelmux}
       REDIS_URL: redis://redis:6379
       PROVIDER_MAX_CONCURRENCY: 2
       PROVIDER_MAX_QUEUE_SIZE: 20
       PROVIDER_QUEUE_TIMEOUT_MS: 30000
+      JOB_MAX_ATTEMPTS: ${JOB_MAX_ATTEMPTS:-3}
+      JOB_BACKOFF_MS: ${JOB_BACKOFF_MS:-1000}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     ports:
       - "3000:3000"
     depends_on:
       ollama:
         condition: service_started
-      postgres:
-        condition: service_healthy
       redis:
         condition: service_healthy
+
+  worker:
+    build:
+      context: .
+    command: ["node", "dist/worker.js"]
+    restart: on-failure
+    environment:
+      OLLAMA_BASE_URL: http://ollama:11434
+      OLLAMA_REQUEST_TIMEOUT_MS: 120000
+      DATABASE_URL: ${DOCKER_DATABASE_URL:-postgresql://modelmux:modelmux@host.docker.internal:5432/modelmux}
+      RABBITMQ_URL: amqp://modelmux:modelmux@rabbitmq:5672
+      JOB_CONCURRENCY: ${JOB_CONCURRENCY:-2}
+      JOB_MAX_ATTEMPTS: ${JOB_MAX_ATTEMPTS:-3}
+      JOB_BACKOFF_MS: ${JOB_BACKOFF_MS:-1000}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    stop_grace_period: 150s
+    depends_on:
+      ollama:
+        condition: service_started
+      rabbitmq:
+        condition: service_healthy
+
+  rabbitmq:
+    image: rabbitmq:4.3-management
+    hostname: rabbitmq
+    environment:
+      RABBITMQ_DEFAULT_USER: modelmux
+      RABBITMQ_DEFAULT_PASS: modelmux
+    ports:
+      - "127.0.0.1:5672:5672"
+      - "127.0.0.1:15672:15672"
+    volumes:
+      - rabbitmq-data:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "check_running"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
 
   ollama:
     image: ollama/ollama:latest
@@ -28,25 +69,9 @@ services:
     volumes:
       - ollama-data:/root/.ollama
 
-  postgres:
-    image: postgres:16-alpine
-    environment:
-      POSTGRES_DB: modelmux
-      POSTGRES_USER: modelmux
-      POSTGRES_PASSWORD: modelmux
-    ports:
-      - "5432:5432"
-    volumes:
-      - postgres-data:/var/lib/postgresql/data
-      - ./db/migrations:/docker-entrypoint-initdb.d:ro
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U modelmux -d modelmux"]
-      interval: 2s
-      timeout: 2s
-      retries: 15
-
   redis:
     image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes", "--appendfsync", "everysec", "--maxmemory-policy", "noeviction"]
     ports:
       - "6379:6379"
     volumes:
@@ -59,5 +84,5 @@ services:
 
 volumes:
   ollama-data:
-  postgres-data:
   redis-data:
+  rabbitmq-data:

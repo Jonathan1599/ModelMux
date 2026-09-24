@@ -1,4 +1,4 @@
-import { readFile } from "node:fs/promises";
+import { readFile, readdir } from "node:fs/promises";
 import { resolve } from "node:path";
 import pg from "pg";
 import { loadConfig } from "../config";
@@ -10,11 +10,11 @@ async function main(): Promise<void> {
   const pool = new Pool({ connectionString: config.databaseUrl });
 
   try {
-    const migration = await readFile(
-      resolve("db/migrations/001_create_api_keys.sql"),
-      "utf8",
-    );
-    await pool.query(migration);
+    const directory = resolve("db/migrations");
+    const files = (await readdir(directory)).filter((file) => file.endsWith(".sql")).sort();
+    for (const file of files) {
+      await pool.query(await readFile(resolve(directory, file), "utf8"));
+    }
     console.log("Database migration completed.");
   } catch (error) {
     console.error("Database migration failed.", error);

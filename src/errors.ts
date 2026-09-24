@@ -122,3 +122,33 @@ export class ConcurrencyWaitTimeoutError extends AppError {
     });
   }
 }
+
+export class JobQueueUnavailableError extends AppError {
+  public readonly statusCode = 503;
+  public readonly code = "JOB_QUEUE_UNAVAILABLE";
+
+  public constructor(cause?: unknown) {
+    super("Inference job queue is unavailable", {
+      cause,
+      headers: { "retry-after": "1" },
+    });
+  }
+}
+
+export class JobNotFoundError extends AppError {
+  public readonly statusCode = 404;
+  public readonly code = "JOB_NOT_FOUND";
+
+  public constructor() {
+    super("Job not found");
+  }
+}
+
+export class IdempotencyConflictError extends AppError {
+  public readonly statusCode = 409;
+  public readonly code = "IDEMPOTENCY_CONFLICT";
+
+  public constructor() {
+    super("Idempotency key has already been used with a different request");
+  }
+}

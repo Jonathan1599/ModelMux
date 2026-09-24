@@ -2,6 +2,7 @@ import type { FastifyPluginAsync, FastifySchema } from "fastify";
 import type { ConcurrencyLimiter } from "../concurrency/concurrency-limiter";
 import type { LLMProvider } from "../providers/provider";
 import type { ChatRequest, ChatResponse } from "../types/chat";
+import { chatRequestSchema, chatResponseSchema } from "./chat-schema";
 
 export interface ChatRoutesOptions {
   provider: LLMProvider;
@@ -9,44 +10,9 @@ export interface ChatRoutesOptions {
 }
 
 const chatSchema = {
-  body: {
-    type: "object",
-    additionalProperties: false,
-    required: ["model", "messages"],
-    properties: {
-      model: { type: "string", minLength: 1 },
-      messages: {
-        type: "array",
-        minItems: 1,
-        items: {
-          type: "object",
-          additionalProperties: false,
-          required: ["role", "content"],
-          properties: {
-            role: { type: "string", enum: ["system", "user", "assistant"] },
-            content: { type: "string", minLength: 1 },
-          },
-        },
-      },
-    },
-  },
+  body: chatRequestSchema,
   response: {
-    200: {
-      type: "object",
-      additionalProperties: false,
-      required: ["message"],
-      properties: {
-        message: {
-          type: "object",
-          additionalProperties: false,
-          required: ["role", "content"],
-          properties: {
-            role: { type: "string", enum: ["assistant"] },
-            content: { type: "string" },
-          },
-        },
-      },
-    },
+    200: chatResponseSchema,
   },
 } satisfies FastifySchema;
 

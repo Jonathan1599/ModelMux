@@ -1,5 +1,7 @@
 You are helping me build **ModelMux**, a production-style LLM inference gateway in Node.js/TypeScript for backend engineering interviews.
 
+Read [HANDOFF.md](HANDOFF.md) first for the latest implementation state, verification results, blockers, and continuation steps. Read [README.md](README.md) for setup and API examples, and [TODO.md](TODO.md) for deferred cancellation work.
+
 The goal is not to maximize features. The goal is to build a clean, understandable backend system that demonstrates:
 
 * API design
@@ -23,7 +25,7 @@ Tech stack:
 * Redis
 * Postgres
 * pgvector
-* BullMQ
+* RabbitMQ
 * Ollama as the primary provider
 * one hosted LLM provider later as fallback
 * Prometheus
@@ -44,6 +46,13 @@ Current project status:
 * Redis enforces an atomic per-key token bucket and returns `429` with `Retry-After` when exhausted.
 * A bounded, process-local FIFO concurrency limiter protects Ollama execution separately from per-key request rate limiting.
 * Provider queue overflow and wait timeout return `503`; successful admissions log queue wait and occupancy values.
+* Async inference uses `POST /v1/jobs` (202 + Location) and owner-scoped `GET /v1/jobs/:id` polling.
+* `JobQueue<TData, TResult>` exposes generic `enqueue()` / `getJob()` calls; RabbitMQ is the current adapter. Inference processing is broker-neutral.
+* Postgres stores jobs, results, idempotency, and a transactional publication flag. Workers publish persistent job IDs using confirms and acknowledge deliveries after persisting outcomes.
+* A separate worker uses bounded exponential retries, leases, and RabbitMQ single-active-consumer mode with bounded prefetch. Standby workers can take over; this async capacity is separate from synchronous gateway limits.
+* Idempotency keys are required and scoped per API key. They deduplicate submissions while the corresponding job remains retained; execution can still repeat after a worker crash.
+* Workers clean up terminal Postgres jobs after 24 hours. Redis remains dedicated to rate limiting.
+* Compose runs gateway, worker, RabbitMQ, Redis, and Ollama, connecting to the existing host Postgres via `DOCKER_DATABASE_URL`.
 * A successful response currently looks like:
 
 ```json
@@ -78,7 +87,7 @@ Important architecture decisions:
 
 2. Do not introduce technologies just for the sake of complexity.
 
-3. BullMQ is intended primarily for asynchronous inference jobs and load leveling. Do not automatically place every synchronous SSE request behind BullMQ unless we deliberately design the return path.
+3. RabbitMQ is intended primarily for asynchronous inference jobs and load leveling. Do not automatically place every synchronous SSE request behind the broker unless we deliberately design the return path.
 
 4. Distinguish:
 
@@ -147,14 +156,20 @@ Substantially complete:
 * clearly separate concurrency control from request rate limiting
 * measure rejection/wait behavior
 
-### Milestone 4 — Async jobs / BullMQ
+### Milestone 4 — Async jobs / RabbitMQ
 
-* BullMQ inference queue
+Implemented; live integration verification requires the configured local Postgres and RabbitMQ:
+
+* RabbitMQ inference queue with durable quorum queues, publisher confirms, manual acknowledgements, and dead letters
 * worker process separate from gateway
 * retries with exponential backoff
 * job status
 * idempotency / in-flight deduplication
 * primarily support async job execution first
+* queue operations behind a small swappable interface; adapter logic isolated in `src/queue/rabbitmq.ts` and `rabbitmq-broker.ts`
+* Postgres outbox, attempt claims, lease recovery, and results in `src/queue/postgres-job-store.ts`
+* migration command applies all SQL files, including `002_create_inference_jobs.sql`
+* test with `npm run check`; verify real queue behavior with `npm run test:integration`
 
 ### Milestone 5 — Provider routing and fault tolerance
 
@@ -252,11 +267,10 @@ How I want you to work with me:
 * If something in the original project plan is a poor design, say so rather than implementing it blindly.
 * Optimize for code I can understand and explain in a backend interview.
 
-For now, do not change any code.
+Session continuity:
 
-First:
-
-1. inspect the existing repository,
-2. tell me what Milestone 1 currently contains,
-3. identify anything that should be fixed before we move on,
-4. then wait for me to choose the next task.
+* The original Milestone 1 inspection request has been completed and superseded by subsequent milestone requests.
+* Milestone 4 and the user-requested switch from BullMQ to RabbitMQ are implemented in the working tree; live integration verification remains blocked as recorded in `HANDOFF.md`.
+* Preserve existing modified and untracked files. Do not recreate the project or create a nested `llm-gateway` directory.
+* The current module configuration is CommonJS with extensionless TypeScript imports; this was committed separately before Milestone 3.
+* Follow the user's current task and do not start Milestone 5 automatically. Update the handoff when implementation or verification status changes.
