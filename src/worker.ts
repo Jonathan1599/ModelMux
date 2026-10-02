@@ -1,9 +1,9 @@
 import pino from "pino";
 import pg from "pg";
-import { loadConfig } from "./config";
+import { loadConfig, providerExecutionTimeoutMs } from "./config";
 import { createInferenceProcessor } from "./jobs/inference-processor";
 import { INFERENCE_QUEUE_NAME } from "./jobs/inference-jobs";
-import { OllamaProvider } from "./providers/ollama";
+import { createProvider } from "./providers/create-provider";
 import { RabbitMqJobWorker } from "./queue/rabbitmq";
 import { RabbitMqBroker } from "./queue/rabbitmq-broker";
 import { PostgresJobStore } from "./queue/postgres-job-store";
@@ -12,7 +12,7 @@ import type { ChatRequest, ChatResponse } from "./types/chat";
 
 const config = loadConfig();
 const logger = pino({ name: "modelmux-worker" });
-const provider = new OllamaProvider(config.ollamaBaseUrl, config.ollamaRequestTimeoutMs);
+const provider = createProvider(config);
 const pool = new pg.Pool({
   connectionString: config.databaseUrl,
   connectionTimeoutMillis: 5_000,
@@ -23,7 +23,7 @@ const store = new PostgresJobStore<ChatRequest, ChatResponse>(pool, {
   name: INFERENCE_QUEUE_NAME,
   maxAttempts: config.jobMaxAttempts,
   backoffMs: config.jobBackoffMs,
-  leaseMs: config.ollamaRequestTimeoutMs + 30_000,
+  leaseMs: providerExecutionTimeoutMs(config) + 30_000,
 });
 const broker = new RabbitMqBroker({
   name: INFERENCE_QUEUE_NAME,

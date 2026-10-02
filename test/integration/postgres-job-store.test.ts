@@ -52,6 +52,16 @@ test("Postgres job store: atomic submissions, outbox, fencing, recovery, retenti
   await store.complete({ id: recovery.id, attempt: 2 }, "correct");
   assert.equal((await store.getJob(recovery.id, submission.ownerId)).response, "correct");
 
+  const cooling = await store.enqueue({ ...submission, idempotencyKey: "circuit-cooldown" });
+  assert.ok(await store.claim({ id: cooling.id, attempt: 1 }));
+  await store.fail({ id: cooling.id, attempt: 1 }, new JobProcessingError("PROVIDER_CIRCUIT_OPEN", true, 30_000));
+  const { rows: [cooldown] } = await pool.query(
+    "SELECT available_at > NOW() + INTERVAL '25 seconds' AS waits_for_circuit FROM inference_jobs WHERE id = $1",
+    [cooling.id],
+  );
+  assert.equal(cooldown.waits_for_circuit, true);
+  assert.equal(await store.claim({ id: cooling.id, attempt: 2 }), null);
+
   await pool.query("UPDATE inference_jobs SET finished_at = NOW() - INTERVAL '25 hours' WHERE id = $1", [id]);
   await store.maintain();
   await assert.rejects(store.getJob(id, submission.ownerId), JobNotFoundError);

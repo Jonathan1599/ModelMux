@@ -2,13 +2,13 @@
 
 ## Propagate client aborts through concurrency and provider execution
 
-The current request cancellation signal is not passed into the concurrency limiter or `OllamaProvider`.
+The current request cancellation signal is not passed into the concurrency limiter, provider router, or HTTP provider adapters.
 
 Current behavior:
 
 - A client that disconnects while waiting remains in the FIFO queue until it receives a permit or reaches `PROVIDER_QUEUE_TIMEOUT_MS`.
 - If that request receives a permit, it may still call Ollama after the client has disconnected.
-- A client that disconnects while holding a permit continues using provider capacity until Ollama completes, fails, or reaches `OLLAMA_REQUEST_TIMEOUT_MS`.
+- A client that disconnects while holding a permit continues using provider capacity through Ollama and any configured fallback, until execution finishes or both provider timeouts are reached.
 - The route still releases acquired permits in `finally`, so capacity is eventually recovered.
 - Limiter counters classify these requests as admitted or timed out instead of aborted.
 
@@ -19,6 +19,7 @@ Required changes:
 - Avoid invoking the provider when the request is already aborted.
 - Extend the provider call contract to accept a cancellation signal without adding Ollama-specific concerns to the route.
 - Combine client cancellation with the configured Ollama timeout, for example with `AbortSignal.any()`.
+- Propagate cancellation through the router and hosted adapter; a client abort must not trigger fallback or count as a provider failure.
 - Preserve permit release in `finally` for every acquired slot.
 - Track and log aborted waits and aborted executions separately from queue timeouts and provider failures.
 

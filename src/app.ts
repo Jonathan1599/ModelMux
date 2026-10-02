@@ -10,12 +10,15 @@ import type { ConcurrencyLimiter } from "./concurrency/concurrency-limiter";
 import { AppError } from "./errors";
 import type { InferenceJobs } from "./jobs/inference-jobs";
 import type { LLMProvider } from "./providers/provider";
+import type { ProviderHealth } from "./providers/router";
 import type { RateLimiter } from "./rate-limit/rate-limiter";
 import { chatRoutes } from "./routes/chat";
 import { jobRoutes } from "./routes/jobs";
+import { providerRoutes } from "./routes/providers";
 
 export interface BuildAppOptions {
   provider: LLMProvider;
+  providerHealth?: () => ProviderHealth[];
   apiKeyAuthenticator: ApiKeyAuthenticator;
   rateLimiter: RateLimiter;
   concurrencyLimiter: ConcurrencyLimiter;
@@ -25,6 +28,7 @@ export interface BuildAppOptions {
 
 export function buildApp({
   provider,
+  providerHealth,
   apiKeyAuthenticator,
   rateLimiter,
   concurrencyLimiter,
@@ -49,6 +53,9 @@ export function buildApp({
     });
     await protectedApp.register(chatRoutes, { provider, concurrencyLimiter });
     await protectedApp.register(jobRoutes, { jobs });
+    if (providerHealth) {
+      await protectedApp.register(providerRoutes, { snapshot: providerHealth });
+    }
   });
 
   app.setErrorHandler<FastifyError>((error, request, reply) => {

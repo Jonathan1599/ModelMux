@@ -36,7 +36,7 @@ export const chatRoutes: FastifyPluginAsync<ChatRoutesOptions> = async (
       );
 
       try {
-        return await provider.chat(request.body);
+        return await provider.chat(request.body, { logger: request.log });
       } finally {
         permit.release();
       }

@@ -101,6 +101,15 @@ test("OllamaProvider rejects malformed successful responses", async (t) => {
   await assert.rejects(provider.chat(request), ProviderResponseError);
 });
 
+test("OllamaProvider classifies a null JSON response as an invalid provider response", async (t) => {
+  t.mock.method(globalThis, "fetch", async () => Response.json(null));
+
+  await assert.rejects(
+    new OllamaProvider("http://ollama.test:11434").chat(request),
+    ProviderResponseError,
+  );
+});
+
 test("OllamaProvider aborts requests that exceed its timeout", async (t) => {
   const originalFetch = globalThis.fetch;
   t.after(() => {

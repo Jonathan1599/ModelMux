@@ -58,6 +58,17 @@ export class ProviderTimeoutError extends AppError {
   }
 }
 
+export class ProviderCircuitOpenError extends AppError {
+  public readonly statusCode = 503;
+  public readonly code = "PROVIDER_CIRCUIT_OPEN";
+
+  public constructor(provider: string, public readonly retryAfterMs: number) {
+    super(`${provider} circuit is temporarily open`, {
+      headers: { "retry-after": String(Math.max(1, Math.ceil(retryAfterMs / 1_000))) },
+    });
+  }
+}
+
 export class AuthenticationError extends AppError {
   public readonly statusCode = 401;
   public readonly code = "INVALID_API_KEY";

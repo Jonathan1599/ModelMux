@@ -173,11 +173,14 @@ Implemented; live integration verification requires the configured local Postgre
 
 ### Milestone 5 — Provider routing and fault tolerance
 
-* second provider
-* provider router
-* circuit breaker
-* fallback behavior
-* provider health state
+Implemented; see `HANDOFF.md` for verification limits:
+
+* optional OpenAI Chat Completions provider (fixed HTTPS endpoint; no adapter retries)
+* shared primary-first provider router in gateway and worker
+* per-provider, process-local circuit breakers with one half-open probe
+* explicit `OPENAI_FALLBACK_MODEL_MAP` and credentials required for hosted fallback
+* protected `/v1/providers` snapshot; worker state visible in correlated logs
+* job leases cover both provider timeouts; circuit cooldown propagates to durable retries
 
 ### Milestone 6 — Streaming
 
@@ -270,7 +273,7 @@ How I want you to work with me:
 Session continuity:
 
 * The original Milestone 1 inspection request has been completed and superseded by subsequent milestone requests.
-* Milestone 4 and the user-requested switch from BullMQ to RabbitMQ are implemented in the working tree; live integration verification remains blocked as recorded in `HANDOFF.md`.
+* Milestone 4 and the user-requested switch from BullMQ to RabbitMQ are committed. Milestone 5 was explicitly requested and is implemented in the working tree; live integration verification remains blocked as recorded in `HANDOFF.md`.
 * Preserve existing modified and untracked files. Do not recreate the project or create a nested `llm-gateway` directory.
 * The current module configuration is CommonJS with extensionless TypeScript imports; this was committed separately before Milestone 3.
-* Follow the user's current task and do not start Milestone 5 automatically. Update the handoff when implementation or verification status changes.
+* Follow the user's current task and do not start Milestone 6 automatically. Update the handoff when implementation or verification status changes.

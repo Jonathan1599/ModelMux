@@ -138,13 +138,13 @@ export class PostgresJobStore<TData, TResult> {
       `UPDATE inference_jobs SET
          status = CASE WHEN $4 AND attempts_made < max_attempts THEN 'retrying' ELSE 'failed' END,
          dispatch_pending = ($4 AND attempts_made < max_attempts),
-         available_at = NOW() + LEAST(3600000,
-           backoff_ms::double precision * POWER(2, LEAST(attempts_made - 1, 30))) * INTERVAL '1 millisecond',
+         available_at = NOW() + GREATEST($6::double precision, LEAST(3600000,
+           backoff_ms::double precision * POWER(2, LEAST(attempts_made - 1, 30)))) * INTERVAL '1 millisecond',
          error_code = $5, lease_until = NULL,
          finished_at = CASE WHEN $4 AND attempts_made < max_attempts THEN NULL ELSE NOW() END
        WHERE id = $1 AND attempts_made = $2 AND queue_name = $3 AND status = 'active'
        RETURNING status`,
-      [message.id, message.attempt, this.options.name, error.retryable, error.code],
+      [message.id, message.attempt, this.options.name, error.retryable, error.code, error.retryAfterMs],
     );
     return row?.status ?? null;
   }

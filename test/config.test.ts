@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { loadConfig } from "../src/config";
+import { loadConfig, providerExecutionTimeoutMs } from "../src/config";
 
 test("async job configuration has defaults and accepts overrides", () => {
   const defaults = loadConfig({});
@@ -23,6 +23,63 @@ test("async job configuration rejects invalid concurrency, attempts, and backoff
   for (const name of ["JOB_CONCURRENCY", "JOB_MAX_ATTEMPTS", "JOB_BACKOFF_MS"]) {
     for (const value of ["0", "-1", "1.5", "bad", "Infinity", "2147483648"]) {
       assert.throws(() => loadConfig({ [name]: value }), new RegExp(name));
+    }
+  }
+});
+
+test("hosted fallback requires an explicit model map; a key alone keeps it disabled", () => {
+  for (const env of [{}, { OPENAI_API_KEY: "test-only-key" }, { OPENAI_FALLBACK_MODEL_MAP: "{}" }]) {
+    const config = loadConfig(env);
+    assert.equal(config.openai, undefined);
+    assert.equal(providerExecutionTimeoutMs(config), 120_000);
+  }
+  assert.throws(() => loadConfig({ OPENAI_FALLBACK_MODEL_MAP: '{"llama3.2":"hosted-model"}' }), /OPENAI_API_KEY/);
+});
+
+test("fallback model mapping and both timeouts determine the execution budget", () => {
+  const config = loadConfig({
+    OPENAI_API_KEY: " test-only-key ",
+    OPENAI_FALLBACK_MODEL_MAP: '{"llama3.2":"hosted-model","local-other":"hosted-other"}',
+    OLLAMA_REQUEST_TIMEOUT_MS: "2000",
+    OPENAI_REQUEST_TIMEOUT_MS: "500",
+    CIRCUIT_BREAKER_FAILURE_THRESHOLD: "2",
+    CIRCUIT_BREAKER_RESET_TIMEOUT_MS: "1000",
+  });
+  assert.deepEqual(config.openai, {
+    apiKey: "test-only-key", requestTimeoutMs: 500,
+    modelMap: { "llama3.2": "hosted-model", "local-other": "hosted-other" },
+  });
+  assert.equal(providerExecutionTimeoutMs(config), 2500);
+  assert.deepEqual(config.circuitBreaker, { failureThreshold: 2, resetTimeoutMs: 1000 });
+  const defaults = loadConfig({
+    OPENAI_API_KEY: "test-only-key", OPENAI_FALLBACK_MODEL_MAP: '{"llama3.2":"hosted-model"}',
+  });
+  assert.equal(defaults.openai?.requestTimeoutMs, 30_000);
+  assert.deepEqual(defaults.circuitBreaker, { failureThreshold: 5, resetTimeoutMs: 30_000 });
+});
+
+test("malformed fallback maps fail startup without echoing their contents", () => {
+  for (const value of [
+    "secret-invalid-json", "null", "[]", "42", '"model"',
+    '{"":"hosted"}', '{"local":null}', '{"local":1}',
+    '{"local":{}}', '{"local":[]}', '{"local":""}', '{" local":"hosted"}', '{"local":" hosted "}',
+  ]) {
+    assert.throws(() => loadConfig({ OPENAI_API_KEY: "test-only-key", OPENAI_FALLBACK_MODEL_MAP: value }),
+      (error: unknown) => {
+        assert.ok(error instanceof Error);
+        assert.match(error.message, /OPENAI_FALLBACK_MODEL_MAP/);
+        assert.doesNotMatch(error.message, /secret-invalid-json|test-only-key/);
+        return true;
+      });
+  }
+});
+
+test("circuit settings and enabled fallback timeouts reject invalid bounds", () => {
+  for (const name of ["CIRCUIT_BREAKER_FAILURE_THRESHOLD", "CIRCUIT_BREAKER_RESET_TIMEOUT_MS", "OPENAI_REQUEST_TIMEOUT_MS"]) {
+    for (const value of ["", "0", "-1", "0.5", "bad", "Infinity", "2147483648"]) {
+      assert.throws(() => loadConfig({
+        OPENAI_API_KEY: "test-only-key", OPENAI_FALLBACK_MODEL_MAP: '{"local":"hosted"}', [name]: value,
+      }), new RegExp(name));
     }
   }
 });

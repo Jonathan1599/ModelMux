@@ -85,7 +85,7 @@ export class OllamaProvider implements LLMProvider {
       throw new ProviderResponseError("Ollama", cause);
     }
 
-    if (typeof data.message?.content !== "string") {
+    if (typeof data?.message?.content !== "string") {
       throw new ProviderResponseError("Ollama");
     }
 

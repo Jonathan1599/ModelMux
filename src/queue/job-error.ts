@@ -3,6 +3,7 @@
 const publicErrors = {
   PROVIDER_UNAVAILABLE: "Unable to connect to the inference provider",
   PROVIDER_TIMEOUT: "Inference provider request timed out",
+  PROVIDER_CIRCUIT_OPEN: "Inference provider is temporarily unavailable",
   PROVIDER_ERROR: "Inference provider request failed",
   INVALID_PROVIDER_RESPONSE: "Inference provider returned an invalid response",
   JOB_FAILED: "Inference job failed",
@@ -14,6 +15,7 @@ export class JobProcessingError extends Error {
   public constructor(
     public readonly code: JobErrorCode,
     public readonly retryable: boolean,
+    public readonly retryAfterMs = 0,
   ) {
     super(code);
     this.name = "JobProcessingError";

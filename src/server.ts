@@ -3,9 +3,9 @@ import pg from "pg";
 import { buildApp } from "./app";
 import { PostgresApiKeyStore } from "./auth/postgres-api-key-store";
 import { StoredApiKeyAuthenticator } from "./auth/api-keys";
-import { loadConfig } from "./config";
+import { loadConfig, providerExecutionTimeoutMs } from "./config";
 import { InMemoryConcurrencyLimiter } from "./concurrency/in-memory-concurrency-limiter";
-import { OllamaProvider } from "./providers/ollama";
+import { createProvider } from "./providers/create-provider";
 import { RedisTokenBucket } from "./rate-limit/redis-token-bucket";
 import { RabbitMqJobQueue } from "./queue/rabbitmq";
 import { PostgresJobStore } from "./queue/postgres-job-store";
@@ -29,7 +29,7 @@ const jobStore = new PostgresJobStore<ChatRequest, ChatResponse>(pool, {
   name: INFERENCE_QUEUE_NAME,
   maxAttempts: config.jobMaxAttempts,
   backoffMs: config.jobBackoffMs,
-  leaseMs: config.ollamaRequestTimeoutMs + 30_000,
+  leaseMs: providerExecutionTimeoutMs(config) + 30_000,
 });
 const apiKeyAuthenticator = new StoredApiKeyAuthenticator(apiKeyStore);
 const rateLimiter = new RedisTokenBucket(redis);
@@ -38,12 +38,10 @@ const concurrencyLimiter = new InMemoryConcurrencyLimiter({
   maxQueueSize: config.providerMaxQueueSize,
   waitTimeoutMs: config.providerQueueTimeoutMs,
 });
-const provider = new OllamaProvider(
-  config.ollamaBaseUrl,
-  config.ollamaRequestTimeoutMs,
-);
+const provider = createProvider(config);
 const app = buildApp({
   provider,
+  providerHealth: () => provider.snapshot(),
   apiKeyAuthenticator,
   rateLimiter,
   concurrencyLimiter,

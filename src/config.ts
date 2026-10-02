@@ -1,5 +1,11 @@
 import "dotenv/config";
 
+export interface OpenAIConfig {
+  apiKey: string;
+  requestTimeoutMs: number;
+  modelMap: Readonly<Record<string, string>>;
+}
+
 export interface Config {
   port: number;
   ollamaBaseUrl: string;
@@ -13,6 +19,8 @@ export interface Config {
   jobConcurrency: number;
   jobMaxAttempts: number;
   jobBackoffMs: number;
+  openai: OpenAIConfig | undefined;
+  circuitBreaker: { failureThreshold: number; resetTimeoutMs: number };
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
@@ -53,6 +61,15 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
       env.JOB_BACKOFF_MS ?? "1000",
       "JOB_BACKOFF_MS",
     ),
+    openai: loadOpenAIConfig(env),
+    circuitBreaker: {
+      failureThreshold: parsePositiveInteger(
+        env.CIRCUIT_BREAKER_FAILURE_THRESHOLD ?? "5", "CIRCUIT_BREAKER_FAILURE_THRESHOLD",
+      ),
+      resetTimeoutMs: parsePositiveInteger(
+        env.CIRCUIT_BREAKER_RESET_TIMEOUT_MS ?? "30000", "CIRCUIT_BREAKER_RESET_TIMEOUT_MS",
+      ),
+    },
   };
 
   validateUrl(config.ollamaBaseUrl, "OLLAMA_BASE_URL", ["http:", "https:"]);
@@ -61,6 +78,45 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   validateUrl(config.rabbitmqUrl, "RABBITMQ_URL", ["amqp:", "amqps:"]);
 
   return config;
+}
+
+// This upper bound also sizes job leases: one primary call, then one fallback.
+export function providerExecutionTimeoutMs(config: Config): number {
+  return config.ollamaRequestTimeoutMs + (config.openai?.requestTimeoutMs ?? 0);
+}
+
+function loadOpenAIConfig(env: NodeJS.ProcessEnv): OpenAIConfig | undefined {
+  const rawMap = env.OPENAI_FALLBACK_MODEL_MAP?.trim();
+  if (!rawMap) return undefined;
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(rawMap);
+  } catch {
+    throw new Error("OPENAI_FALLBACK_MODEL_MAP must be a JSON object of local model names to hosted model names");
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error("OPENAI_FALLBACK_MODEL_MAP must be a JSON object");
+  }
+  const entries = Object.entries(parsed);
+  for (const [localModel, hostedModel] of entries) {
+    if (!localModel.trim() || localModel !== localModel.trim()
+      || typeof hostedModel !== "string" || !hostedModel.trim()
+      || hostedModel !== hostedModel.trim()) {
+      throw new Error("OPENAI_FALLBACK_MODEL_MAP must map non-empty model names without surrounding whitespace");
+    }
+  }
+  if (entries.length === 0) return undefined;
+
+  const apiKey = env.OPENAI_API_KEY?.trim();
+  if (!apiKey) throw new Error("OPENAI_API_KEY is required when OPENAI_FALLBACK_MODEL_MAP is configured");
+  return {
+    apiKey,
+    modelMap: Object.freeze(Object.fromEntries(entries)) as Readonly<Record<string, string>>,
+    requestTimeoutMs: parsePositiveInteger(
+      env.OPENAI_REQUEST_TIMEOUT_MS ?? "30000", "OPENAI_REQUEST_TIMEOUT_MS",
+    ),
+  };
 }
 
 function parsePort(value: string): number {
