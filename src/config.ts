@@ -21,6 +21,7 @@ export interface Config {
   jobBackoffMs: number;
   openai: OpenAIConfig | undefined;
   circuitBreaker: { failureThreshold: number; resetTimeoutMs: number };
+  chatCache: { ttlSeconds: number; maxEntryBytes: number; timeoutMs: number; version: string };
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
@@ -69,6 +70,12 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
       resetTimeoutMs: parsePositiveInteger(
         env.CIRCUIT_BREAKER_RESET_TIMEOUT_MS ?? "30000", "CIRCUIT_BREAKER_RESET_TIMEOUT_MS",
       ),
+    },
+    chatCache: {
+      ttlSeconds: parseNonNegativeInteger(env.CHAT_CACHE_TTL_SECONDS ?? "300", "CHAT_CACHE_TTL_SECONDS"),
+      maxEntryBytes: parsePositiveInteger(env.CHAT_CACHE_MAX_ENTRY_BYTES ?? "65536", "CHAT_CACHE_MAX_ENTRY_BYTES"),
+      timeoutMs: parsePositiveInteger(env.CHAT_CACHE_TIMEOUT_MS ?? "100", "CHAT_CACHE_TIMEOUT_MS"),
+      version: env.CHAT_CACHE_VERSION?.trim() || "1",
     },
   };
 

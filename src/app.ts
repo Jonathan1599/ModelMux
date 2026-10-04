@@ -7,6 +7,7 @@ import fastify, {
 import type { ApiKeyAuthenticator } from "./auth/api-keys";
 import { configureApiKeyGuard } from "./auth/guard";
 import type { ConcurrencyLimiter } from "./concurrency/concurrency-limiter";
+import type { ChatCache } from "./cache/chat-cache";
 import { AppError } from "./errors";
 import type { InferenceJobs } from "./jobs/inference-jobs";
 import type { LLMProvider } from "./providers/provider";
@@ -22,6 +23,7 @@ export interface BuildAppOptions {
   apiKeyAuthenticator: ApiKeyAuthenticator;
   rateLimiter: RateLimiter;
   concurrencyLimiter: ConcurrencyLimiter;
+  chatCache?: ChatCache | undefined;
   jobs: InferenceJobs;
   logger?: FastifyServerOptions["logger"];
 }
@@ -32,6 +34,7 @@ export function buildApp({
   apiKeyAuthenticator,
   rateLimiter,
   concurrencyLimiter,
+  chatCache,
   jobs,
   logger = { level: "info" },
 }: BuildAppOptions): FastifyInstance {
@@ -51,7 +54,7 @@ export function buildApp({
       authenticator: apiKeyAuthenticator,
       rateLimiter,
     });
-    await protectedApp.register(chatRoutes, { provider, concurrencyLimiter });
+    await protectedApp.register(chatRoutes, { provider, concurrencyLimiter, chatCache });
     await protectedApp.register(jobRoutes, { jobs });
     if (providerHealth) {
       await protectedApp.register(providerRoutes, { snapshot: providerHealth });

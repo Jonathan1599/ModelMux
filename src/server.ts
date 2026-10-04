@@ -3,6 +3,8 @@ import pg from "pg";
 import { buildApp } from "./app";
 import { PostgresApiKeyStore } from "./auth/postgres-api-key-store";
 import { StoredApiKeyAuthenticator } from "./auth/api-keys";
+import { RedisChatCache } from "./cache/redis-chat-cache";
+import { chatCacheNamespace } from "./cache/cache-key";
 import { loadConfig, providerExecutionTimeoutMs } from "./config";
 import { InMemoryConcurrencyLimiter } from "./concurrency/in-memory-concurrency-limiter";
 import { createProvider } from "./providers/create-provider";
@@ -24,6 +26,19 @@ const redis = new Redis(config.redisUrl, {
   lazyConnect: true,
   maxRetriesPerRequest: 1,
 });
+// Same Redis server, separate connection: cache failures must not queue commands
+// indefinitely or change the rate limiter's connection policy.
+const cacheRedis = config.chatCache.ttlSeconds > 0 ? new Redis(config.redisUrl, {
+  lazyConnect: true,
+  enableOfflineQueue: false,
+  maxRetriesPerRequest: 0,
+  autoResendUnfulfilledCommands: false,
+  commandTimeout: config.chatCache.timeoutMs,
+}) : undefined;
+const chatCache = cacheRedis ? new RedisChatCache(cacheRedis, {
+  ...config.chatCache,
+  namespace: chatCacheNamespace(config),
+}) : undefined;
 const apiKeyStore = new PostgresApiKeyStore(pool);
 const jobStore = new PostgresJobStore<ChatRequest, ChatResponse>(pool, {
   name: INFERENCE_QUEUE_NAME,
@@ -45,6 +60,7 @@ const app = buildApp({
   apiKeyAuthenticator,
   rateLimiter,
   concurrencyLimiter,
+  chatCache,
   jobs: new RabbitMqJobQueue(jobStore),
 });
 let isShuttingDown = false;
@@ -56,14 +72,20 @@ pool.on("error", (error) => {
 redis.on("error", (error) => {
   app.log.error({ err: error }, "Redis connection failed");
 });
+cacheRedis?.on("error", () => {
+  app.log.warn("Chat cache Redis connection unavailable");
+});
 
 async function start(): Promise<void> {
   try {
+    // Optional optimization: a cache connection must not gate server startup.
+    void cacheRedis?.connect().catch(() => app.log.warn("Chat cache initially unavailable; requests will bypass it"));
     await Promise.all([pool.query("SELECT 1"), redis.connect()]);
     await app.listen({ port: config.port, host: "0.0.0.0" });
   } catch (error) {
     app.log.fatal({ err: error }, "Failed to start gateway");
     redis.disconnect();
+    cacheRedis?.disconnect();
     await pool.end().catch(() => undefined);
     process.exitCode = 1;
   }
@@ -85,6 +107,7 @@ async function shutdown(signal: NodeJS.Signals): Promise<void> {
   }
 
   redis.disconnect();
+  cacheRedis?.disconnect();
 
   try {
     await pool.end();

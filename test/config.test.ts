@@ -2,6 +2,21 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { loadConfig, providerExecutionTimeoutMs } from "../src/config";
 
+test("exact cache settings have safe defaults, accept overrides, and allow disabling", () => {
+  assert.deepEqual(loadConfig({}).chatCache, { ttlSeconds: 300, maxEntryBytes: 65536, timeoutMs: 100, version: "1" });
+  assert.deepEqual(loadConfig({
+    CHAT_CACHE_TTL_SECONDS: "0", CHAT_CACHE_MAX_ENTRY_BYTES: "1024",
+    CHAT_CACHE_TIMEOUT_MS: "50", CHAT_CACHE_VERSION: " model-revision-2 ",
+  }).chatCache, { ttlSeconds: 0, maxEntryBytes: 1024, timeoutMs: 50, version: "model-revision-2" });
+  for (const name of ["CHAT_CACHE_TTL_SECONDS", "CHAT_CACHE_MAX_ENTRY_BYTES", "CHAT_CACHE_TIMEOUT_MS"]) {
+    for (const value of ["-1", "1.5", "bad", "Infinity", "2147483648"]) {
+      assert.throws(() => loadConfig({ [name]: value }), new RegExp(name));
+    }
+  }
+  assert.throws(() => loadConfig({ CHAT_CACHE_MAX_ENTRY_BYTES: "0" }), /CHAT_CACHE_MAX_ENTRY_BYTES/);
+  assert.throws(() => loadConfig({ CHAT_CACHE_TIMEOUT_MS: "0" }), /CHAT_CACHE_TIMEOUT_MS/);
+});
+
 test("async job configuration has defaults and accepts overrides", () => {
   const defaults = loadConfig({});
   assert.equal(defaults.jobConcurrency, 2);
