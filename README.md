@@ -1,6 +1,6 @@
 # ModelMux
 
-ModelMux is a provider-agnostic LLM inference gateway built with Node.js, TypeScript, and Fastify. It authenticates clients with API keys, applies a distributed per-key token bucket, and supports synchronous chat and asynchronous inference jobs backed by RabbitMQ and Postgres.
+ModelMux is a provider-agnostic LLM inference gateway built with Node.js, TypeScript, and Fastify. It authenticates clients with API keys, applies a distributed per-key token bucket, and supports synchronous chat, SSE streaming, and asynchronous inference jobs backed by RabbitMQ and Postgres.
 
 Ollama is the primary provider. Optional OpenAI fallback uses explicit model mappings, with a separate circuit breaker for each provider.
 
@@ -17,6 +17,9 @@ Client
        -> bounded process-local concurrency limiter
        -> ProviderRouter -> Ollama (primary) -> ChatResponse
                          -> OpenAI (configured fallback on transient failures)
+  -> POST /v1/chat/stream
+       -> same concurrency limiter and provider router (no RabbitMQ)
+       -> Ollama / configured OpenAI fallback -> SSE deltas -> client
   -> POST /v1/jobs + Idempotency-Key
        -> JobQueue.enqueue() -> Postgres job + pending-publication flag
        -> 202 Accepted + job ID
@@ -42,22 +45,24 @@ Rate-limit policies are stored per API key:
 - `refill-per-second` controls the sustained request rate.
 - Redis evaluates each request atomically using its own server clock.
 
-The gateway fails closed when the API-key store or rate limiter is unavailable. Authentication and per-key rate limiting apply to `/v1/chat`, job submission, and job polling. Polling and repeated submissions each consume a token.
+The gateway fails closed when the API-key store or rate limiter is unavailable. Authentication and per-key rate limiting apply to both chat routes, provider status, job submission, and job polling. Each HTTP request consumes one token; streamed chunks do not consume additional tokens.
 
 Provider execution is protected separately by a process-local concurrency limiter:
 
-- `PROVIDER_MAX_CONCURRENCY` controls active synchronous routing passes. One permit covers the primary call and any fallback call.
+- `PROVIDER_MAX_CONCURRENCY` controls active synchronous routing passes, shared by ordinary and streaming chat. One permit covers the primary call and any fallback call, including the full stream.
 - `PROVIDER_MAX_QUEUE_SIZE` bounds the number of synchronous requests waiting for a slot.
 - `PROVIDER_QUEUE_TIMEOUT_MS` bounds how long a request can wait.
 - Queue overflow and wait timeout return `503` with `Retry-After`.
 
 The synchronous wait queue is FIFO, bounded, and held only in gateway memory. It absorbs short bursts but is not a durable job queue. Each gateway replica has its own limit. Async jobs use RabbitMQ's single-active-consumer mode with prefetch set to `JOB_CONCURRENCY`. One worker consumes at a time; additional workers are standbys and may also dispatch pending publications. All workers should use the same concurrency setting. With one gateway and the defaults, normal capacity is four Ollama calls: two synchronous calls plus two async jobs. Size these limits together for your provider. Connection loss and lease recovery can temporarily overlap old and new executions; this is not an exactly-once execution guarantee.
 
-Successful admissions emit structured fields for queue wait time, active executions, and queued requests. The limiter also tracks admitted, rejected, timed-out, total-wait, and maximum-wait values for the later metrics milestone.
+Successful admissions emit structured fields for queue wait time, active executions, and queued requests. The limiter also tracks admitted, rejected, timed-out, aborted acquisitions, total-wait, and maximum-wait values for the later metrics milestone. Disconnects remove queued waiters or abort active provider requests; logs distinguish cancellation during queueing from execution. Acquired permits are always released in `finally`.
 
 ### Provider routing and circuit breakers
 
 Both HTTP chat and job workers use `ProviderRouter`, which implements `LLMProvider`. Each routing pass tries Ollama once. Connection failures, timeouts, HTTP `429`, and HTTP `5xx` permit one fallback call if the requested model has an explicit hosted mapping. An open Ollama circuit also permits fallback. Other errors, including upstream `400`/`401`/`404`, invalid responses, and unexpected application errors, surface immediately. If fallback fails, its error determines the HTTP response and whether an async attempt is retryable. There are no hidden adapter retries.
+
+Streaming uses the same policy only **before the first nonempty text delta is handed to the client writer**. Once output starts, the router never retries or switches models. Client cancellation and downstream write failures do not count as provider health outcomes or trigger fallback. An abandoned half-open probe releases its probe slot so the next request can test recovery immediately; it does not reset the failure count.
 
 Each provider has a separate process-local circuit:
 
@@ -96,7 +101,7 @@ curl http://localhost:3000/v1/providers \
 
 OpenAI appears only when enabled. This endpoint returns a snapshot with `Cache-Control: no-store`; it makes no provider calls, exposes no credentials, and does not report worker circuit state. Worker provider logs include the job's original request ID and circuit state. `/health` remains process liveness only. Open circuits without a usable fallback return `503 PROVIDER_CIRCUIT_OPEN` with `Retry-After`.
 
-One execution can take up to the sum of both configured provider timeouts (120s + 30s by default when fallback is enabled), plus local overhead. Async leases add a 30s margin. Synchronous requests can also wait for a concurrency permit before execution. Async retries repeat the routing pass and remain bounded by `JOB_MAX_ATTEMPTS`. If a circuit is open, the durable retry delay is at least its remaining cooldown, even when that exceeds the normal backoff cap. A skipped routing pass still consumes a job attempt. The default Compose shutdown grace is 180s; increase `PROVIDER_STOP_GRACE_PERIOD` when increasing provider timeouts, and account for queued synchronous work during draining.
+One execution can take up to the sum of both configured provider timeouts (120s + 30s by default when fallback is enabled), plus local overhead. Async leases add a 30s margin. Synchronous requests can also wait for a concurrency permit before execution. Async retries repeat the routing pass and remain bounded by `JOB_MAX_ATTEMPTS`. If a circuit is open, the durable retry delay is at least its remaining cooldown, even when that exceeds the normal backoff cap. A skipped routing pass still consumes a job attempt. Gateway shutdown cancels active and queued synchronous chat, including SSE; worker shutdown still drains accepted jobs. The default Compose shutdown grace is 180s; increase `PROVIDER_STOP_GRACE_PERIOD` when increasing provider timeouts to allow worker draining.
 
 ### Swappable queue adapter
 
@@ -177,6 +182,49 @@ A successful response has a provider-neutral shape:
 
 Rate-limited requests return `429` and include `Retry-After`, `X-RateLimit-Limit`, and `X-RateLimit-Remaining` headers.
 
+### Stream an answer
+
+Use the same request body and bearer key with `POST /v1/chat/stream`. `curl -N` disables curl's output buffering:
+
+```bash
+curl -N --request POST http://localhost:3000/v1/chat/stream \
+  --header "authorization: Bearer ${API_KEY}" \
+  --header 'content-type: application/json' \
+  --data '{"model":"llama3.2","messages":[{"role":"user","content":"Explain TCP in one sentence."}]}'
+```
+
+The response is `text/event-stream`, with JSON data in named SSE events:
+
+```text
+event: delta
+data: {"content":"TCP ","requestId":"example-request-id"}
+
+event: delta
+data: {"content":"delivers bytes reliably.","requestId":"example-request-id"}
+
+event: done
+data: {"requestId":"example-request-id"}
+
+```
+
+Append each `delta.content` to the displayed answer. A delta is a text fragment, not necessarily one token. `done` means the provider stream ended normally; an empty answer still receives `done`. Token usage and provider finish reasons are not exposed yet, so `done` does not distinguish a natural stop from a provider output-length limit.
+
+Before any text is emitted, failures use the normal JSON error response and HTTP status. After output starts, the status is already `200`; failures produce a sanitized `error` event when the socket is still writable, then close without `done`:
+
+```text
+event: error
+data: {"code":"PROVIDER_TIMEOUT","message":"The response could not be completed","requestId":"example-request-id"}
+
+```
+
+Clients must treat `error` **or EOF without `done`** as an incomplete answer. A disconnected or stalled socket may close without an error event. There is no replay, resume, or automatic retry of a partial answer. In a browser, use `fetch` and read its response stream; native `EventSource` cannot send this POST body and bearer header.
+
+Streaming goes directly through the gateway, not RabbitMQ: no worker-to-gateway return channel is needed, and accepted async jobs retain their independent lifecycle. `LLMProvider.stream()` awaits each text consumer callback. The adapters decode [Ollama NDJSON](https://docs.ollama.com/api/streaming) and [OpenAI Chat Completions SSE](https://developers.openai.com/api/docs/guides/streaming-responses) incrementally, including UTF-8 split across network chunks, and require provider terminal markers. Incomplete or malformed streams are not silently treated as successful.
+
+When the downstream socket buffer fills, the gateway waits for `drain` before consuming more provider text. A 15-second stalled-write limit cancels the request. Provider timeouts cover the entire call, including streamed body reads and downstream waits; whichever deadline expires first wins. An overall provider timeout still counts toward the circuit breaker, even if downstream waiting contributed to that duration. Parsers bound each line/SSE data event to 65,536 decoded characters, retain at most the unfinished frame plus the current network chunk, and never accumulate the full answer. Transport buffers still exist on both sides.
+
+Closing the client connection, cancelling a browser fetch, or shutting down the gateway aborts upstream HTTP and releases gateway capacity. Remote inference may not stop immediately; cancelling transport is not a guarantee that the provider stops computing. SSE sends `Cache-Control: no-cache, no-transform` and `X-Accel-Buffering: no`; configure any reverse proxy to honor streaming and allow the intended timeout. No heartbeat is sent while waiting for capacity or the first text, so proxy idle timeouts must account for that delay.
+
 ### Submit and poll an async job
 
 Use the same chat body and include a client-generated idempotency key:
@@ -254,10 +302,10 @@ The final three arguments to `api-key:create` are the key name, burst capacity, 
 | --- | --- | --- |
 | `PORT` | `3000` | Gateway listen port |
 | `OLLAMA_BASE_URL` | `http://localhost:11434` | Ollama server URL |
-| `OLLAMA_REQUEST_TIMEOUT_MS` | `120000` | Maximum non-streaming Ollama request duration |
+| `OLLAMA_REQUEST_TIMEOUT_MS` | `120000` | Entire Ollama call deadline, including streaming and downstream waits |
 | `OPENAI_API_KEY` | unset | Server-side hosted credential; a key alone does not enable fallback |
 | `OPENAI_FALLBACK_MODEL_MAP` | unset | JSON object mapping incoming local model names to hosted replacements; explicit opt-in |
-| `OPENAI_REQUEST_TIMEOUT_MS` | `30000` | Hosted call timeout when fallback is enabled |
+| `OPENAI_REQUEST_TIMEOUT_MS` | `30000` | Entire hosted call deadline, including streaming, when fallback is enabled |
 | `CIRCUIT_BREAKER_FAILURE_THRESHOLD` | `5` | Consecutive transient failures before opening each circuit |
 | `CIRCUIT_BREAKER_RESET_TIMEOUT_MS` | `30000` | Cooldown before one recovery request is admitted |
 | `PROVIDER_STOP_GRACE_PERIOD` | `180s` | Compose gateway/worker shutdown grace; size for configured timeouts |
@@ -283,6 +331,7 @@ Values from a local `.env` file are loaded when present.
 | `404` | `JOB_NOT_FOUND` | Job is missing, removed, or belongs to another API key |
 | `409` | `IDEMPOTENCY_CONFLICT` | The same key was used with different input |
 | `429` | `RATE_LIMIT_EXCEEDED` | The API key has exhausted its token bucket |
+| `501` | `STREAMING_UNSUPPORTED` | A selected custom provider does not implement streaming |
 | `502` | `PROVIDER_ERROR` | The last attempted provider returned an unsuccessful response |
 | `502` | `INVALID_PROVIDER_RESPONSE` | A provider returned a malformed successful response |
 | `503` | `API_KEY_STORE_UNAVAILABLE` | Postgres could not authenticate the request |
@@ -294,7 +343,7 @@ Values from a local `.env` file are loaded when present.
 | `503` | `CONCURRENCY_WAIT_TIMEOUT` | A request waited too long for provider capacity |
 | `504` | `PROVIDER_TIMEOUT` | The last attempted provider exceeded its configured timeout |
 
-Error responses include the request ID. Ollama upstream error details may appear in structured logs; OpenAI response bodies and low-level error causes are discarded to avoid echoing hosted credentials or prompts. Neither is returned in public error details.
+Error responses include the request ID. For streaming, these HTTP statuses only apply before SSE output begins; later failures use the `error` event described above. Ollama upstream error details may appear in structured logs; OpenAI response bodies and low-level error causes are discarded to avoid echoing hosted credentials or prompts. Neither is returned in public error details.
 
 ## Development commands
 
@@ -303,9 +352,12 @@ npm test
 npm run typecheck
 npm run build
 npm run check
+npm run test:streaming
 ```
 
-Unit and injection tests mock queue/provider boundaries and need no running services. Integration tests use the configured local `DATABASE_URL` and `RABBITMQ_URL` to exercise real SQL concurrency, confirmed publication, retries, dead letters, results, and bounded consumption across two workers, using a stub provider:
+Unit and injection tests mock queue/provider boundaries and need no running services. `test:streaming` separately starts ephemeral localhost HTTP servers with stub upstream responses to verify incremental delivery, disconnect cancellation, capacity recovery, and shutdown; it needs socket permissions but no database, broker, Ollama, or hosted key. Unit tests also exercise backpressure, parsing, fallback boundaries, and cancellation-safe circuit state.
+
+Integration tests use the configured local `DATABASE_URL` and `RABBITMQ_URL` to exercise real SQL concurrency, confirmed publication, retries, dead letters, results, and bounded consumption across two workers, using a stub provider:
 
 ```bash
 docker compose up -d rabbitmq
@@ -323,6 +375,7 @@ Tests create and remove a random Postgres schema and random RabbitMQ queues. You
 ├── db/migrations              # Idempotent Postgres schema
 ├── src
 │   ├── app.ts                 # Fastify app factory and error handling
+│   ├── cancellation.ts        # Shared cancellation error and abortable waits
 │   ├── config.ts              # Environment configuration
 │   ├── errors.ts              # Stable application errors
 │   ├── server.ts              # Runtime composition and listener
@@ -339,6 +392,8 @@ Tests create and remove a random Postgres schema and random RabbitMQ queues. You
 │   │   ├── router.ts          # Primary-first routing and explicit fallback maps
 │   │   ├── circuit-breaker.ts # Per-process closed/open/half-open state
 │   │   ├── failure-policy.ts  # Shared fallback and job retry classification
+│   │   ├── http-request.ts    # Whole-call deadlines and upstream cancellation
+│   │   ├── stream-parser.ts   # Bounded incremental NDJSON/SSE decoding
 │   │   ├── ollama.ts          # Ollama HTTP adapter
 │   │   ├── openai.ts          # Optional hosted Chat Completions adapter
 │   │   └── provider.ts        # Provider interface
@@ -355,8 +410,11 @@ Tests create and remove a random Postgres schema and random RabbitMQ queues. You
 │   │   ├── rate-limiter.ts    # Provider-neutral limiter contract
 │   │   └── redis-token-bucket.ts
 │   ├── routes
-│   │   ├── chat.ts           # Synchronous chat
+│   │   ├── chat.ts           # Synchronous chat and direct SSE streaming
 │   │   ├── chat-schema.ts    # Shared chat schemas
+│   │   ├── request-cancellation.ts # Disconnect and shutdown signals
+│   │   ├── sse.ts            # SSE framing and bounded drain waits
+│   │   ├── providers.ts      # Protected process-local circuit snapshots
 │   │   └── jobs.ts           # Async submission and polling
 │   ├── scripts               # Migration and API-key commands
 │   └── types/chat.ts          # Chat request/response types
@@ -367,4 +425,4 @@ Tests create and remove a random Postgres schema and random RabbitMQ queues. You
 └── .env.example
 ```
 
-Caching, provider failover, circuit breakers, streaming, Prometheus, Grafana, pgvector, and load testing remain intentionally deferred to later milestones. Client-abort propagation for synchronous chat is tracked in `TODO.md`.
+Caching, Prometheus, Grafana, pgvector experiments, and load testing remain intentionally deferred to later milestones. Cancellation implementation and remaining verification follow-ups are tracked in `TODO.md`.

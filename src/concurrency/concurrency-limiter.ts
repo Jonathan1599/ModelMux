@@ -11,11 +11,12 @@ export interface ConcurrencySnapshot {
   admitted: number;
   rejected: number;
   timedOut: number;
+  aborted: number;
   totalWaitTimeMs: number;
   maxWaitTimeMs: number;
 }
 
 export interface ConcurrencyLimiter {
-  acquire(): Promise<ConcurrencyPermit>;
+  acquire(signal?: AbortSignal): Promise<ConcurrencyPermit>;
   snapshot(): ConcurrencySnapshot;
 }

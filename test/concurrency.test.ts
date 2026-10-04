@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { RequestAbortedError, throwIfCancelled } from "../src/cancellation";
 import { InMemoryConcurrencyLimiter } from "../src/concurrency/in-memory-concurrency-limiter";
 import {
   ConcurrencyQueueFullError,
@@ -80,5 +81,41 @@ test("concurrency limiter times out queued work and removes it", async () => {
   assert.equal(snapshot.timedOut, 1);
 
   active.release();
+  assert.equal(limiter.snapshot().active, 0);
+});
+
+test("aborted waiters leave the FIFO queue and do not consume the next permit", async () => {
+  const limiter = new InMemoryConcurrencyLimiter({ maxConcurrent: 1, maxQueueSize: 2, waitTimeoutMs: 1000 });
+  const active = await limiter.acquire();
+  const controller = new AbortController();
+  const cancelled = assert.rejects(limiter.acquire(controller.signal), RequestAbortedError);
+  const next = limiter.acquire();
+  controller.abort();
+  await cancelled;
+  assert.equal(limiter.snapshot().queued, 1);
+  assert.equal(limiter.snapshot().aborted, 1);
+  assert.equal(limiter.snapshot().timedOut, 0);
+  assert.equal(limiter.snapshot().admitted, 1);
+  active.release();
+  const permit = await next;
+  permit.release();
+  permit.release();
+  assert.equal(limiter.snapshot().active, 0);
+  assert.equal(limiter.snapshot().queued, 0);
+  assert.equal(limiter.snapshot().admitted, 2);
+});
+
+test("cancellation before acquire and immediately after admission never leaks capacity", async () => {
+  const limiter = new InMemoryConcurrencyLimiter({ maxConcurrent: 1, maxQueueSize: 1, waitTimeoutMs: 1000 });
+  const alreadyAborted = AbortSignal.abort();
+  await assert.rejects(limiter.acquire(alreadyAborted), RequestAbortedError);
+  assert.equal(limiter.snapshot().active, 0);
+  assert.equal(limiter.snapshot().admitted, 0);
+  const controller = new AbortController();
+  const admitted = limiter.acquire(controller.signal);
+  controller.abort();
+  const permit = await admitted;
+  try { assert.throws(() => throwIfCancelled(controller.signal), RequestAbortedError); }
+  finally { permit.release(); }
   assert.equal(limiter.snapshot().active, 0);
 });

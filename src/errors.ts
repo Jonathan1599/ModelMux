@@ -69,6 +69,13 @@ export class ProviderCircuitOpenError extends AppError {
   }
 }
 
+export class ProviderStreamingUnsupportedError extends AppError {
+  public readonly statusCode = 501;
+  public readonly code = "STREAMING_UNSUPPORTED";
+
+  public constructor() { super("The configured provider does not support streaming"); }
+}
+
 export class AuthenticationError extends AppError {
   public readonly statusCode = 401;
   public readonly code = "INVALID_API_KEY";

@@ -1,4 +1,5 @@
 import { performance } from "node:perf_hooks";
+import { RequestAbortedError } from "../cancellation";
 import {
   ConcurrencyQueueFullError,
   ConcurrencyWaitTimeoutError,
@@ -12,8 +13,8 @@ import type {
 interface PendingAcquire {
   enqueuedAt: number;
   resolve: (permit: ConcurrencyPermit) => void;
-  reject: (error: ConcurrencyWaitTimeoutError) => void;
   timer: NodeJS.Timeout | undefined;
+  cleanup: () => void;
 }
 
 export interface InMemoryConcurrencyLimiterOptions {
@@ -34,6 +35,7 @@ export class InMemoryConcurrencyLimiter implements ConcurrencyLimiter {
   private admitted = 0;
   private rejected = 0;
   private timedOut = 0;
+  private aborted = 0;
   private totalWaitTimeMs = 0;
   private maxWaitTimeMs = 0;
 
@@ -43,7 +45,11 @@ export class InMemoryConcurrencyLimiter implements ConcurrencyLimiter {
     validateOptions(options);
   }
 
-  public async acquire(): Promise<ConcurrencyPermit> {
+  public async acquire(signal?: AbortSignal): Promise<ConcurrencyPermit> {
+    if (signal?.aborted) {
+      this.aborted += 1;
+      throw new RequestAbortedError();
+    }
     if (this.active < this.options.maxConcurrent) {
       this.active += 1;
       return this.admit(0);
@@ -61,23 +67,34 @@ export class InMemoryConcurrencyLimiter implements ConcurrencyLimiter {
       const pending: PendingAcquire = {
         enqueuedAt: performance.now(),
         resolve,
-        reject,
         timer: undefined,
+        cleanup: () => {
+          clearTimeout(pending.timer);
+          signal?.removeEventListener("abort", onAbort);
+        },
+      };
+
+      const remove = (): boolean => {
+        const index = this.queue.indexOf(pending);
+        if (index === -1) return false;
+        this.queue.splice(index, 1);
+        pending.cleanup();
+        return true;
+      };
+      const onAbort = () => {
+        if (!remove()) return;
+        this.aborted += 1;
+        reject(new RequestAbortedError());
       };
 
       pending.timer = setTimeout(() => {
-        const index = this.queue.indexOf(pending);
-
-        if (index === -1) {
-          return;
-        }
-
-        this.queue.splice(index, 1);
+        if (!remove()) return;
         this.timedOut += 1;
         reject(new ConcurrencyWaitTimeoutError(this.options.waitTimeoutMs));
       }, this.options.waitTimeoutMs);
 
       this.queue.push(pending);
+      signal?.addEventListener("abort", onAbort, { once: true });
     });
   }
 
@@ -88,6 +105,7 @@ export class InMemoryConcurrencyLimiter implements ConcurrencyLimiter {
       admitted: this.admitted,
       rejected: this.rejected,
       timedOut: this.timedOut,
+      aborted: this.aborted,
       totalWaitTimeMs: this.totalWaitTimeMs,
       maxWaitTimeMs: this.maxWaitTimeMs,
     };
@@ -122,9 +140,7 @@ export class InMemoryConcurrencyLimiter implements ConcurrencyLimiter {
       return;
     }
 
-    if (next.timer) {
-      clearTimeout(next.timer);
-    }
+    next.cleanup();
 
     const waitTimeMs = performance.now() - next.enqueuedAt;
     next.resolve(this.admit(waitTimeMs));

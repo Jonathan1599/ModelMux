@@ -404,6 +404,7 @@ function emptyConcurrencySnapshot(): ConcurrencySnapshot {
     active: 0,
     queued: 0,
     admitted: 0,
+    aborted: 0,
     rejected: 0,
     timedOut: 0,
     totalWaitTimeMs: 0,

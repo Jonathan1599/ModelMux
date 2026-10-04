@@ -19,6 +19,7 @@
     "test": "node --import tsx --test test/*.test.ts",
     "test:integration": "node --import tsx --test test/integration/*.test.ts",
     "test:store": "node --import tsx --test test/integration/postgres-job-store.test.ts",
+    "test:streaming": "node --import tsx --test test/http/*.test.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json",
     "check": "npm run typecheck && npm test"
   },

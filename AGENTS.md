@@ -1,6 +1,6 @@
 You are helping me build **ModelMux**, a production-style LLM inference gateway in Node.js/TypeScript for backend engineering interviews.
 
-Read [HANDOFF.md](HANDOFF.md) first for the latest implementation state, verification results, blockers, and continuation steps. Read [README.md](README.md) for setup and API examples, and [TODO.md](TODO.md) for deferred cancellation work.
+Read [HANDOFF.md](HANDOFF.md) first for the latest implementation state, verification results, blockers, and continuation steps. Read [README.md](README.md) for setup and API examples, and [TODO.md](TODO.md) for cancellation status and remaining verification.
 
 The goal is not to maximize features. The goal is to build a clean, understandable backend system that demonstrates:
 
@@ -39,6 +39,10 @@ Current project status:
 * Fastify receives a provider-neutral chat request.
 * The route goes through an `LLMProvider` abstraction.
 * `OllamaProvider` calls local Ollama.
+* Optional OpenAI fallback uses explicit model mappings and per-provider, process-local circuit breakers.
+* `POST /v1/chat/stream` sends SSE directly through the gateway with backpressure and no RabbitMQ return path.
+* Both chat routes remove disconnected queued requests and abort active upstream HTTP; gateway shutdown cancels them too. Worker jobs remain independent.
+* Streaming fallback is allowed only before the first text delta. Cancellation does not count as a provider failure.
 * Ollama calls have a configurable timeout and return a distinct gateway timeout error.
 * The gateway closes gracefully on `SIGINT` and `SIGTERM`.
 * `POST /v1/chat` requires a bearer API key.
@@ -184,11 +188,15 @@ Implemented; see `HANDOFF.md` for verification limits:
 
 ### Milestone 6 — Streaming
 
-* SSE
-* upstream abort on client disconnect
-* backpressure handling
-* avoid leaking provider/worker capacity
-* deliberately decide whether streaming bypasses the queue or uses a worker-to-gateway transport mechanism
+Implemented; tested with mocked protocols and real localhost sockets, not live model inference:
+
+* `POST /v1/chat/stream` with provider-neutral `delta`, `done`, and safe `error` events
+* incremental Ollama NDJSON and OpenAI SSE adapters; awaitable delta consumer carries backpressure
+* direct gateway/provider path, bypassing RabbitMQ; same auth, rate limit, and synchronous concurrency pool
+* abort queued/active chat on disconnect or gateway shutdown, with permit/timer/listener cleanup
+* bounded drain waits and frame sizes; whole-call provider deadlines
+* fallback before output only; cancelled circuit probes release their slot without marking health
+* `npm run check` plus `npm run test:streaming` for real socket lifecycle tests
 
 ### Milestone 7 — Caching
 
@@ -273,7 +281,7 @@ How I want you to work with me:
 Session continuity:
 
 * The original Milestone 1 inspection request has been completed and superseded by subsequent milestone requests.
-* Milestone 4 and the user-requested switch from BullMQ to RabbitMQ are committed. Milestone 5 was explicitly requested and is implemented in the working tree; live integration verification remains blocked as recorded in `HANDOFF.md`.
+* Milestones 1–5, including the RabbitMQ switch, are committed. Milestone 6 was explicitly requested and is implemented in the working tree. Live database/broker verification remains outstanding as recorded in `HANDOFF.md`.
 * Preserve existing modified and untracked files. Do not recreate the project or create a nested `llm-gateway` directory.
 * The current module configuration is CommonJS with extensionless TypeScript imports; this was committed separately before Milestone 3.
-* Follow the user's current task and do not start Milestone 6 automatically. Update the handoff when implementation or verification status changes.
+* Follow the user's current task and do not start Milestone 7 automatically. Update the handoff when implementation or verification status changes.

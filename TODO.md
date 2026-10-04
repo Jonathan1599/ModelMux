@@ -1,35 +1,24 @@
 # TODO
 
-## Propagate client aborts through concurrency and provider execution
+## Completed in Milestone 6: chat cancellation and streaming
 
-The current request cancellation signal is not passed into the concurrency limiter, provider router, or HTTP provider adapters.
+Both `POST /v1/chat` and `POST /v1/chat/stream` now propagate disconnect and gateway-shutdown cancellation through the FIFO limiter, provider router, and both HTTP adapters.
 
-Current behavior:
+- Aborted queued requests are removed immediately and their timer/listener is cleared.
+- A cancellation check immediately after admission prevents a disconnected request from starting inference.
+- Active upstream fetch/body reads are aborted; every acquired permit is released in `finally`.
+- Client cancellation does not trigger fallback, reset consecutive failures, or count as a provider failure. Cancelled half-open probes release the probe slot for a future request.
+- Limiter snapshots count aborted acquisitions separately from timed-out waits. Route logs distinguish queue/execution cancellation.
+- SSE has bounded drain waits and incremental parsing, and fallback is prohibited after the first text delta.
+- Gateway shutdown cancels active and queued synchronous requests. Accepted async jobs are still durable and independent of the submitting HTTP connection; worker shutdown still drains them.
 
-- A client that disconnects while waiting remains in the FIFO queue until it receives a permit or reaches `PROVIDER_QUEUE_TIMEOUT_MS`.
-- If that request receives a permit, it may still call Ollama after the client has disconnected.
-- A client that disconnects while holding a permit continues using provider capacity through Ollama and any configured fallback, until execution finishes or both provider timeouts are reached.
-- The route still releases acquired permits in `finally`, so capacity is eventually recovered.
-- Limiter counters classify these requests as admitted or timed out instead of aborted.
+`npm run check` covers FIFO abort races, idempotent release, adapter cancellation, parsing, backpressure, and circuit/fallback behavior. `npm run test:streaming` uses real localhost sockets with a stub upstream to verify incremental delivery, queued/active disconnects, subsequent capacity reuse, and gateway shutdown.
 
-Required changes:
+## Remaining verification and deliberate limits
 
-- Allow `ConcurrencyLimiter.acquire()` to accept an `AbortSignal`.
-- Remove an aborted waiter from the queue and clear its wait timer.
-- Avoid invoking the provider when the request is already aborted.
-- Extend the provider call contract to accept a cancellation signal without adding Ollama-specific concerns to the route.
-- Combine client cancellation with the configured Ollama timeout, for example with `AbortSignal.any()`.
-- Propagate cancellation through the router and hosted adapter; a client abort must not trigger fallback or count as a provider failure.
-- Preserve permit release in `finally` for every acquired slot.
-- Track and log aborted waits and aborted executions separately from queue timeouts and provider failures.
-
-Tests should cover:
-
-- abort while queued;
-- abort immediately before admission;
-- abort while Ollama holds a slot;
-- the next queued request receiving the released slot;
-- no duplicate release or active-count underflow;
-- aborted requests not being counted as queue timeouts.
-
-This work fits naturally with the streaming/cancellation milestone, but it should be completed before relying on the concurrency limiter under frequent client disconnects.
+- Live Ollama streaming and optional hosted fallback still need an application smoke test with working local auth/rate-limit infrastructure. See `HANDOFF.md` for the previously observed Postgres authentication blocker; do not substitute a Docker Postgres instance.
+- Verify proxy buffering/idle timeouts in the eventual deployment. There are no SSE heartbeats, replay, or resume semantics; do not add them without a concrete requirement.
+- Disconnecting HTTP is best-effort upstream cancellation, not proof that remote inference stopped computing.
+- Whole-call provider deadlines include downstream waits and still count as provider timeouts if they expire first. More nuanced slow-client attribution can be revisited with actual measurements.
+- Token usage and finish reasons are not exposed in streaming events yet. Track these deliberately with the observability milestone rather than assuming every `done` means the model reached a natural stop.
+- Milestone 7 (exact caching) and later milestones require a new user request.

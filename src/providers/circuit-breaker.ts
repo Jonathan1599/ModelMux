@@ -54,6 +54,7 @@ export class CircuitBreaker {
   public async execute<T>(
     operation: () => Promise<T>,
     isFailure: (error: unknown) => boolean,
+    isIgnored: (error: unknown) => boolean = () => false,
   ): Promise<T> {
     const snapshot = this.snapshot();
 
@@ -78,7 +79,15 @@ export class CircuitBreaker {
       return result;
     } catch (error) {
       if (generation === this.generation) {
-        if (isFailure(error)) {
+        if (isIgnored(error)) {
+          // An abandoned recovery probe says nothing about provider health.
+          // Release its slot so the next real request can test recovery.
+          if (this.state === "half-open") {
+            this.state = "open";
+            this.openedAt = this.now() - this.resetTimeoutMs;
+            this.generation += 1;
+          }
+        } else if (isFailure(error)) {
           this.recordFailure();
         } else {
           // A permanent request error still demonstrates provider reachability.
