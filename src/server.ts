@@ -13,10 +13,13 @@ import { RabbitMqJobQueue } from "./queue/rabbitmq";
 import { PostgresJobStore } from "./queue/postgres-job-store";
 import type { ChatRequest, ChatResponse } from "./types/chat";
 import { INFERENCE_QUEUE_NAME } from "./jobs/inference-jobs";
+import { Metrics } from "./observability/metrics";
+import { buildMetricsServer } from "./observability/server";
 
 const { Pool } = pg;
 
 const config = loadConfig();
+const metrics = new Metrics("gateway");
 const pool = new Pool({
   connectionString: config.databaseUrl,
   connectionTimeoutMillis: 5_000,
@@ -52,8 +55,12 @@ const concurrencyLimiter = new InMemoryConcurrencyLimiter({
   maxConcurrent: config.providerMaxConcurrency,
   maxQueueSize: config.providerMaxQueueSize,
   waitTimeoutMs: config.providerQueueTimeoutMs,
-});
-const provider = createProvider(config);
+}, metrics);
+const provider = createProvider(config, metrics);
+metrics.bindConcurrency(() => concurrencyLimiter.snapshot());
+metrics.bindProviders(() => provider.snapshot());
+metrics.bindQueueDepth(() => jobStore.queueDepth());
+const metricsServer = buildMetricsServer(metrics);
 const app = buildApp({
   provider,
   providerHealth: () => provider.snapshot(),
@@ -61,6 +68,7 @@ const app = buildApp({
   rateLimiter,
   concurrencyLimiter,
   chatCache,
+  metrics,
   jobs: new RabbitMqJobQueue(jobStore),
 });
 let isShuttingDown = false;
@@ -82,8 +90,11 @@ async function start(): Promise<void> {
     void cacheRedis?.connect().catch(() => app.log.warn("Chat cache initially unavailable; requests will bypass it"));
     await Promise.all([pool.query("SELECT 1"), redis.connect()]);
     await app.listen({ port: config.port, host: "0.0.0.0" });
+    await metricsServer.listen({ port: config.metrics.gatewayPort, host: config.metrics.host })
+      .catch(() => app.log.warn("Metrics listener unavailable; gateway remains running"));
   } catch (error) {
     app.log.fatal({ err: error }, "Failed to start gateway");
+    await metricsServer.close().catch(() => undefined);
     redis.disconnect();
     cacheRedis?.disconnect();
     await pool.end().catch(() => undefined);
@@ -108,6 +119,7 @@ async function shutdown(signal: NodeJS.Signals): Promise<void> {
 
   redis.disconnect();
   cacheRedis?.disconnect();
+  await metricsServer.close().catch(() => app.log.warn("Metrics listener failed to close cleanly"));
 
   try {
     await pool.end();

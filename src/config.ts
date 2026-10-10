@@ -22,6 +22,7 @@ export interface Config {
   openai: OpenAIConfig | undefined;
   circuitBreaker: { failureThreshold: number; resetTimeoutMs: number };
   chatCache: { ttlSeconds: number; maxEntryBytes: number; timeoutMs: number; version: string };
+  metrics: { host: string; gatewayPort: number; workerPort: number };
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
@@ -77,6 +78,11 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
       timeoutMs: parsePositiveInteger(env.CHAT_CACHE_TIMEOUT_MS ?? "100", "CHAT_CACHE_TIMEOUT_MS"),
       version: env.CHAT_CACHE_VERSION?.trim() || "1",
     },
+    metrics: {
+      host: env.METRICS_HOST?.trim() || "127.0.0.1",
+      gatewayPort: parsePort(env.GATEWAY_METRICS_PORT ?? "9464", "GATEWAY_METRICS_PORT"),
+      workerPort: parsePort(env.WORKER_METRICS_PORT ?? "9465", "WORKER_METRICS_PORT"),
+    },
   };
 
   validateUrl(config.ollamaBaseUrl, "OLLAMA_BASE_URL", ["http:", "https:"]);
@@ -126,12 +132,12 @@ function loadOpenAIConfig(env: NodeJS.ProcessEnv): OpenAIConfig | undefined {
   };
 }
 
-function parsePort(value: string): number {
+function parsePort(value: string, name = "PORT"): number {
   const port = Number(value);
 
   if (!Number.isInteger(port) || port < 1 || port > 65_535) {
     throw new Error(
-      `PORT must be an integer between 1 and 65535; received ${value}`,
+      `${name} must be an integer between 1 and 65535; received ${value}`,
     );
   }
 

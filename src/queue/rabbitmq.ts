@@ -5,6 +5,7 @@ import { JobProcessingError } from "./job-error";
 import type { JobProcessor, JobQueue, JobReceipt, JobStatus, JobSubmission, JobWorker } from "./job-queue";
 import type { JobEnvelope, PostgresJobStore } from "./postgres-job-store";
 import type { RabbitBroker } from "./rabbitmq-broker";
+import { recordMetric, type JobOutcome, type MetricSink } from "../observability/telemetry";
 
 export class RabbitMqJobQueue<TData, TResult> implements JobQueue<TData, TResult> {
   public constructor(private readonly store: Pick<PostgresJobStore<TData, TResult>, "enqueue" | "getJob">) {}
@@ -44,6 +45,7 @@ export class RabbitMqJobWorker<TData, TResult> implements JobWorker {
     private readonly store: WorkerStore<TData, TResult>,
     private readonly processor: JobProcessor<TData, TResult>,
     private readonly logger: Logger,
+    private readonly metrics?: MetricSink,
   ) {}
 
   public run(): Promise<void> {
@@ -79,23 +81,32 @@ export class RabbitMqJobWorker<TData, TResult> implements JobWorker {
   private async execute(message: JobEnvelope): Promise<"ack" | "dead-letter"> {
     const job = await this.store.claim(message);
     if (!job) return "ack"; // Already active, terminal, missing, or an obsolete attempt.
-    let response: TResult;
+    const startedAt = performance.now();
+    let outcome: JobOutcome = "infrastructure_error";
+    recordMetric(this.metrics, { kind: "job_start", retry: job.attempt > 1, queueWaitTimeMs: job.queueWaitTimeMs });
     try {
-      response = await this.processor(job);
-    } catch (error) {
-      const failure = error instanceof JobProcessingError
-        ? error : new JobProcessingError("JOB_FAILED", false);
-      const status = await this.store.fail(message, failure);
-      this.logger.warn({
-        reqId: job.requestId, jobId: job.id, attempt: job.attempt,
-        status, code: failure.code,
-      }, "Job attempt failed");
-      return status === "failed" ? "dead-letter" : "ack";
+      let response: TResult;
+      try {
+        response = await this.processor(job);
+      } catch (error) {
+        const failure = error instanceof JobProcessingError
+          ? error : new JobProcessingError("JOB_FAILED", false);
+        const status = await this.store.fail(message, failure);
+        outcome = status ?? "obsolete";
+        this.logger.warn({
+          reqId: job.requestId, jobId: job.id, attempt: job.attempt,
+          status, code: failure.code,
+        }, "Job attempt failed");
+        return status === "failed" ? "dead-letter" : "ack";
+      }
+      // Persist first, acknowledge second. Database failures remain infrastructure
+      // errors and leave the RabbitMQ delivery unacknowledged.
+      await this.store.complete(message, response);
+      outcome = "success";
+      return "ack";
+    } finally {
+      recordMetric(this.metrics, { kind: "job_end", outcome, durationMs: performance.now() - startedAt });
     }
-    // Persist first, acknowledge second. Database failures leave the RabbitMQ
-    // delivery unacknowledged; they are not classified as provider failures.
-    await this.store.complete(message, response);
-    return "ack";
   }
 
   private async drain(): Promise<void> {

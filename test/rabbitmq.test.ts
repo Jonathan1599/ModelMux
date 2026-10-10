@@ -7,6 +7,9 @@ import { JobProcessingError } from "../src/queue/job-error";
 import type { RabbitBroker } from "../src/queue/rabbitmq-broker";
 import type { JobEnvelope } from "../src/queue/postgres-job-store";
 import type { ProcessingJob } from "../src/queue/job-queue";
+import { Metrics } from "../src/observability/metrics";
+import type { MetricSink } from "../src/observability/telemetry";
+import { metricSample as sample } from "./helpers/metric-sample";
 
 const job: ProcessingJob<string> = {
   id: "job-1", requestId: "request-1", ownerId: "owner-1", data: "hello", attempt: 1,
@@ -29,7 +32,7 @@ test("RabbitMQ queue preserves application errors and maps storage outages to 50
 
 type Store = ConstructorParameters<typeof RabbitMqJobWorker<string, string>>[1];
 
-async function startWorker(store: Partial<Store>, processor: (job: ProcessingJob<string>) => Promise<string>) {
+async function startWorker(store: Partial<Store>, processor: (job: ProcessingJob<string>) => Promise<string>, metrics?: MetricSink) {
   let handler!: (message: JobEnvelope) => Promise<"ack" | "dead-letter">;
   let ready!: () => void;
   const connected = new Promise<void>((resolve) => { ready = resolve; });
@@ -49,7 +52,7 @@ async function startWorker(store: Partial<Store>, processor: (job: ProcessingJob
     async complete() {},
     async fail() { return "failed"; },
     ...store,
-  }, processor, logger);
+  }, processor, logger, metrics);
   const running = worker.run();
   await connected;
   return { handler, events, async close() { await worker.close(); await running; } };
@@ -122,4 +125,41 @@ test("closing a worker cancels consumption and shuts down its dispatcher", async
   await worker.close();
   await worker.close();
   assert.deepEqual(worker.events, ["cancel", "close"]);
+});
+
+test("job metrics track claimed retries and persistence outcomes without changing acknowledgements", async (t) => {
+  for (const outcome of ["success", "retrying", "failed", "infrastructure_error"] as const) {
+    const metrics = new Metrics("worker");
+    const worker = await startWorker({
+      async claim() { return { ...job, attempt: 2, queueWaitTimeMs: 125 }; },
+      async complete() { if (outcome === "infrastructure_error") throw new Error("database offline"); },
+      async fail() { return outcome === "retrying" ? "retrying" : "failed"; },
+    }, async () => {
+      assert.equal(await sample(metrics, "job_attempts_active"), 1);
+      if (outcome === "retrying" || outcome === "failed") throw new JobProcessingError("JOB_FAILED", outcome === "retrying");
+      return "answer";
+    }, metrics);
+    t.after(worker.close);
+    if (outcome === "infrastructure_error") await assert.rejects(worker.handler(envelope), /database offline/);
+    else assert.equal(await worker.handler(envelope), outcome === "failed" ? "dead-letter" : "ack");
+    assert.equal(await sample(metrics, "job_attempts_total", { outcome }), 1);
+    assert.equal(await sample(metrics, "job_retries_started_total"), 1);
+    assert.equal(await sample(metrics, "job_attempts_active"), 0);
+    assert.equal(await sample(metrics, "job_queue_wait_seconds", {}, "_sum"), 0.125);
+  }
+});
+
+test("duplicate delivery is not an attempt and throwing metrics cannot break persistence-before-ack", async (t) => {
+  const metrics = new Metrics("worker");
+  const duplicate = await startWorker({ async claim() { return null; } }, async () => "unused", metrics);
+  t.after(duplicate.close);
+  await duplicate.handler(envelope);
+  assert.equal(await sample(metrics, "job_attempt_duration_seconds", {}, "_count"), 0);
+  let persisted = false;
+  const worker = await startWorker({ async complete() { persisted = true; } }, async () => "answer", {
+    record() { throw new Error("broken telemetry"); },
+  });
+  t.after(worker.close);
+  assert.equal(await worker.handler(envelope), "ack");
+  assert.equal(persisted, true);
 });

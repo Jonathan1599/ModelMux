@@ -9,10 +9,15 @@ import { RabbitMqBroker } from "./queue/rabbitmq-broker";
 import { PostgresJobStore } from "./queue/postgres-job-store";
 import type { JobWorker } from "./queue/job-queue";
 import type { ChatRequest, ChatResponse } from "./types/chat";
+import { Metrics } from "./observability/metrics";
+import { buildMetricsServer } from "./observability/server";
 
 const config = loadConfig();
 const logger = pino({ name: "modelmux-worker" });
-const provider = createProvider(config);
+const metrics = new Metrics("worker");
+const provider = createProvider(config, metrics);
+metrics.bindProviders(() => provider.snapshot());
+const metricsServer = buildMetricsServer(metrics);
 const pool = new pg.Pool({
   connectionString: config.databaseUrl,
   connectionTimeoutMillis: 5_000,
@@ -31,7 +36,7 @@ const broker = new RabbitMqBroker({
   concurrency: config.jobConcurrency,
 });
 const worker: JobWorker = new RabbitMqJobWorker(
-  broker, store, createInferenceProcessor(provider, logger), logger,
+  broker, store, createInferenceProcessor(provider, logger), logger, metrics,
 );
 let isShuttingDown = false;
 
@@ -45,6 +50,7 @@ async function shutdown(): Promise<void> {
     logger.error({ err }, "Failed to close worker cleanly");
     process.exitCode = 1;
   } finally {
+    await metricsServer.close().catch(() => logger.warn("Metrics listener failed to close cleanly"));
     await pool.end().catch((err: unknown) => {
       logger.error({ err }, "Failed to close the Postgres pool");
       process.exitCode = 1;
@@ -55,7 +61,13 @@ async function shutdown(): Promise<void> {
 process.once("SIGINT", () => void shutdown());
 process.once("SIGTERM", () => void shutdown());
 
-void worker.run().catch(async (err: unknown) => {
+async function start(): Promise<void> {
+  await metricsServer.listen({ port: config.metrics.workerPort, host: config.metrics.host })
+    .catch(() => logger.warn("Metrics listener unavailable; worker remains running"));
+  if (!isShuttingDown) await worker.run();
+}
+
+void start().catch(async (err: unknown) => {
   logger.fatal({ err }, "Inference worker stopped unexpectedly");
   process.exitCode = 1;
   await shutdown();

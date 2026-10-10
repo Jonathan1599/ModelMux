@@ -1,5 +1,6 @@
 import { performance } from "node:perf_hooks";
 import { RequestAbortedError } from "../cancellation";
+import { recordMetric, type MetricSink } from "../observability/telemetry";
 import {
   ConcurrencyQueueFullError,
   ConcurrencyWaitTimeoutError,
@@ -41,6 +42,7 @@ export class InMemoryConcurrencyLimiter implements ConcurrencyLimiter {
 
   public constructor(
     private readonly options: InMemoryConcurrencyLimiterOptions,
+    private readonly metrics?: MetricSink,
   ) {
     validateOptions(options);
   }
@@ -48,6 +50,7 @@ export class InMemoryConcurrencyLimiter implements ConcurrencyLimiter {
   public async acquire(signal?: AbortSignal): Promise<ConcurrencyPermit> {
     if (signal?.aborted) {
       this.aborted += 1;
+      recordMetric(this.metrics, { kind: "admission", outcome: "cancelled", durationMs: 0 });
       throw new RequestAbortedError();
     }
     if (this.active < this.options.maxConcurrent) {
@@ -57,6 +60,7 @@ export class InMemoryConcurrencyLimiter implements ConcurrencyLimiter {
 
     if (this.queue.length >= this.options.maxQueueSize) {
       this.rejected += 1;
+      recordMetric(this.metrics, { kind: "admission", outcome: "queue_full", durationMs: 0 });
       throw new ConcurrencyQueueFullError(
         this.options.maxConcurrent,
         this.options.maxQueueSize,
@@ -84,12 +88,14 @@ export class InMemoryConcurrencyLimiter implements ConcurrencyLimiter {
       const onAbort = () => {
         if (!remove()) return;
         this.aborted += 1;
+        recordMetric(this.metrics, { kind: "admission", outcome: "cancelled", durationMs: performance.now() - pending.enqueuedAt });
         reject(new RequestAbortedError());
       };
 
       pending.timer = setTimeout(() => {
         if (!remove()) return;
         this.timedOut += 1;
+        recordMetric(this.metrics, { kind: "admission", outcome: "timeout", durationMs: performance.now() - pending.enqueuedAt });
         reject(new ConcurrencyWaitTimeoutError(this.options.waitTimeoutMs));
       }, this.options.waitTimeoutMs);
 
@@ -112,6 +118,7 @@ export class InMemoryConcurrencyLimiter implements ConcurrencyLimiter {
   }
 
   private admit(waitTimeMs: number): ConcurrencyPermit {
+    recordMetric(this.metrics, { kind: "admission", outcome: "admitted", durationMs: waitTimeMs });
     this.admitted += 1;
     this.totalWaitTimeMs += waitTimeMs;
     this.maxWaitTimeMs = Math.max(this.maxWaitTimeMs, waitTimeMs);

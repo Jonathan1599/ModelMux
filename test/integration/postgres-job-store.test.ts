@@ -15,6 +15,7 @@ test("Postgres job store: atomic submissions, outbox, fencing, recovery, retenti
   const submission = { ownerId: "owner-1", requestId: "request-1", idempotencyKey: "key-1", data: { a: 1, b: 2 } };
   const receipts = await Promise.all(Array.from({ length: 10 }, () => store.enqueue(submission)));
   const { id } = receipts[0]!;
+  assert.deepEqual(await store.queueDepth(), { queued: 1, retrying: 0, active: 0 });
   assert.equal(new Set(receipts.map((receipt) => receipt.id)).size, 1);
   assert.deepEqual(await store.enqueue({ ...submission, data: { b: 2, a: 1 } }), receipts[0]);
   await assert.rejects(store.enqueue({ ...submission, data: { a: 2, b: 1 } }), IdempotencyConflictError);
@@ -31,6 +32,8 @@ test("Postgres job store: atomic submissions, outbox, fencing, recovery, retenti
   assert.equal(publications, 1);
   const claims = await Promise.all([store.claim({ id, attempt: 1 }), store.claim({ id, attempt: 1 })]);
   assert.equal(claims.filter(Boolean).length, 1);
+  assert.ok(claims.find(Boolean)!.queueWaitTimeMs! >= 0);
+  assert.deepEqual(await store.queueDepth(), { queued: 0, retrying: 0, active: 1 });
   assert.equal((await store.getJob(id, submission.ownerId)).status, "active");
 
   assert.equal(await store.fail({ id, attempt: 1 }, new JobProcessingError("PROVIDER_TIMEOUT", true)), "retrying");

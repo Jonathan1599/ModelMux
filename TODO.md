@@ -20,5 +20,9 @@ Both `POST /v1/chat` and `POST /v1/chat/stream` now propagate disconnect and gat
 - Verify proxy buffering/idle timeouts in the eventual deployment. There are no SSE heartbeats, replay, or resume semantics; do not add them without a concrete requirement.
 - Disconnecting HTTP is best-effort upstream cancellation, not proof that remote inference stopped computing.
 - Whole-call provider deadlines include downstream waits and still count as provider timeouts if they expire first. More nuanced slow-client attribution can be revisited with actual measurements.
-- Token usage and finish reasons are not exposed in streaming events yet. Track these deliberately with the observability milestone rather than assuming every `done` means the model reached a natural stop.
-- Milestone 7 (exact caching) and later milestones require a new user request.
+- Token usage and finish reasons are not exposed in streaming events yet. Observability deliberately omits token counts and estimated cost until the provider contract carries reliable usage metadata. Do not assume every `done` means the model reached a natural stop.
+- Exact caching is committed. Live Redis verification remains outstanding (connection failed; Docker daemon unavailable at the last check). See README for the opt-in header and cache privacy/retention tradeoffs.
+- Milestone 8 observability is implemented. Live Prometheus scraping/Grafana rendering remain unverified because Docker was unavailable; static dashboard references and real localhost scrape tests are covered. Verify the new Postgres queue-depth/claim-wait SQL once local database authentication works.
+- `prom-client` 15 supports the current Node 20 runtime but is deprecated by its maintainers. Plan an explicit runtime upgrade and migration to `@prometheus-io/client` (current replacement requires newer Node); do not silently raise the runtime requirement during an unrelated milestone.
+- Monitor the scrape query's database cost under load. Durable backlog snapshots are shared across gateways, not additive or equal to RabbitMQ delivery counts. A one-second collector/driver timeout bounds waiting, not database execution; the existing statement timeout remains the SQL bound.
+- Milestone 9 load testing requires a new user request. No performance figures have been claimed from unit tests or the provisioned dashboard.

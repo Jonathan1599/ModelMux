@@ -4,6 +4,8 @@ services:
       context: .
     environment:
       PORT: 3000
+      METRICS_HOST: 0.0.0.0
+      GATEWAY_METRICS_PORT: 9464
       OLLAMA_BASE_URL: http://ollama:11434
       OLLAMA_REQUEST_TIMEOUT_MS: ${OLLAMA_REQUEST_TIMEOUT_MS:-120000}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
@@ -39,6 +41,8 @@ services:
     command: ["node", "dist/worker.js"]
     restart: on-failure
     environment:
+      METRICS_HOST: 0.0.0.0
+      WORKER_METRICS_PORT: 9465
       OLLAMA_BASE_URL: http://ollama:11434
       OLLAMA_REQUEST_TIMEOUT_MS: ${OLLAMA_REQUEST_TIMEOUT_MS:-120000}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
@@ -59,6 +63,36 @@ services:
         condition: service_started
       rabbitmq:
         condition: service_healthy
+
+  prometheus:
+    image: prom/prometheus:v3.15.0
+    profiles: ["observability"]
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=7d
+    ports:
+      - "127.0.0.1:9090:9090"
+    volumes:
+      - ./observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+
+  grafana:
+    image: grafana/grafana:13.2.3
+    profiles: ["observability"]
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-modelmux-local-only}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+    ports:
+      - "127.0.0.1:3001:3000"
+    volumes:
+      - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    depends_on:
+      - prometheus
 
   rabbitmq:
     image: rabbitmq:4.3-management
@@ -101,3 +135,5 @@ volumes:
   ollama-data:
   redis-data:
   rabbitmq-data:
+  prometheus-data:
+  grafana-data:

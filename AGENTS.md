@@ -55,7 +55,7 @@ Current project status:
 * Postgres stores jobs, results, idempotency, and a transactional publication flag. Workers publish persistent job IDs using confirms and acknowledge deliveries after persisting outcomes.
 * A separate worker uses bounded exponential retries, leases, and RabbitMQ single-active-consumer mode with bounded prefetch. Standby workers can take over; this async capacity is separate from synchronous gateway limits.
 * Idempotency keys are required and scoped per API key. They deduplicate submissions while the corresponding job remains retained; execution can still repeat after a worker crash.
-* Workers clean up terminal Postgres jobs after 24 hours. Redis remains dedicated to rate limiting.
+* Workers clean up terminal Postgres jobs after 24 hours. Redis handles rate limiting and opt-in exact-response caching.
 * Compose runs gateway, worker, RabbitMQ, Redis, and Ollama, connecting to the existing host Postgres via `DOCKER_DATABASE_URL`.
 * A successful response currently looks like:
 
@@ -200,9 +200,13 @@ Implemented; tested with mocked protocols and real localhost sockets, not live m
 
 ### Milestone 7 — Caching
 
-First:
+Exact caching implemented for `POST /v1/chat`:
 
-* exact cache
+* opt in with `X-Cache-Mode: use`; per-API-key scope and full request/routing identity
+* Redis TTL, bounded values/command waits, safe cache bypass on errors
+* hits still authenticate and rate-limit, but skip provider capacity and circuits
+* streaming/jobs unchanged; no single-flight guarantee or semantic matching
+* live Redis verification remains outstanding; see `HANDOFF.md`
 
 Later experiment:
 
@@ -213,7 +217,7 @@ Later experiment:
 
 ### Milestone 8 — Observability
 
-Metrics should eventually include:
+Implemented in the working tree: internal gateway/worker metrics, Prometheus scrape configuration, and one provisioned Grafana dashboard. Live monitoring verification awaits Docker; see `HANDOFF.md`. Metrics include:
 
 * request count
 * request latency
@@ -227,10 +231,10 @@ Metrics should eventually include:
 * retries
 * circuit-breaker state
 * cache hits/misses
-* token usage
-* estimated inference cost
+* separate SSE semantic outcomes and HTTP transport outcomes
+* collector health and unavailable backlog values on SQL errors
 
-Structured logs should preserve a request ID across gateway → queue → worker.
+Token usage and estimated inference cost remain deferred until the provider contract carries reliable usage metadata; do not estimate tokens from text chunks. Metrics labels must stay bounded and exclude request/job IDs, identities, prompts, and arbitrary model names. Structured logs preserve a request ID across gateway → queue → worker. Global Postgres job-depth snapshots are not RabbitMQ queue depth and must not be summed across gateway replicas.
 
 ### Milestone 9 — Load testing
 
@@ -281,7 +285,7 @@ How I want you to work with me:
 Session continuity:
 
 * The original Milestone 1 inspection request has been completed and superseded by subsequent milestone requests.
-* Milestones 1–5, including the RabbitMQ switch, are committed. Milestone 6 was explicitly requested and is implemented in the working tree. Live database/broker verification remains outstanding as recorded in `HANDOFF.md`.
+* Milestones 1–7 are committed. Milestone 8 is implemented in the working tree; no commit is authorized. Live infrastructure verification remains outstanding as recorded in `HANDOFF.md`.
 * Preserve existing modified and untracked files. Do not recreate the project or create a nested `llm-gateway` directory.
 * The current module configuration is CommonJS with extensionless TypeScript imports; this was committed separately before Milestone 3.
-* Follow the user's current task and do not start Milestone 7 automatically. Update the handoff when implementation or verification status changes.
+* Follow the user's current task and do not start Milestone 9 automatically. Update the handoff when implementation or verification status changes.

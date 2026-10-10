@@ -3,6 +3,8 @@ import { createServer, request as httpRequest, type RequestListener } from "node
 import { setTimeout as delay } from "node:timers/promises";
 import test, { type TestContext } from "node:test";
 import { OllamaProvider } from "../../src/providers/ollama";
+import { Metrics } from "../../src/observability/metrics";
+import { metricSample as sample } from "../helpers/metric-sample";
 import { chatApp, chatHeaders, chatPayload } from "../helpers/chat-app";
 
 function deferred() {
@@ -31,10 +33,11 @@ async function setup(t: TestContext, handle: RequestListener, maxQueueSize = 2) 
   });
   const address = upstream.address();
   assert.ok(address && typeof address !== "string");
-  const fixture = chatApp(new OllamaProvider(`http://127.0.0.1:${address.port}`, 5000), maxQueueSize);
+  const metrics = new Metrics("gateway");
+  const fixture = chatApp(new OllamaProvider(`http://127.0.0.1:${address.port}`, 5000), maxQueueSize, metrics);
   t.after(async () => { fixture.app.server.closeAllConnections(); await fixture.app.close(); });
   const base = await fixture.app.listen({ port: 0, host: "127.0.0.1" });
-  return { ...fixture, base };
+  return { ...fixture, base, metrics };
 }
 
 function startRequest(base: string, path: string) {
@@ -82,7 +85,7 @@ test("real client disconnect aborts Ollama and frees capacity for both chat mode
     const started = deferred();
     const closed = deferred();
     let calls = 0;
-    const { base, limiter, app } = await setup(t, (_request, response) => {
+    const { base, limiter, app, metrics } = await setup(t, (_request, response) => {
       calls += 1;
       if (calls === 1) {
         response.on("close", closed.resolve);
@@ -96,6 +99,9 @@ test("real client disconnect aborts Ollama and frees capacity for both chat mode
     client.destroy();
     await closed.promise;
     await until(() => limiter.snapshot().active === 0);
+    assert.equal(await sample(metrics, "http_active"), 0);
+    assert.equal(await sample(metrics, "http_requests_total", { route: path, outcome: "aborted" }), 1);
+    if (path.endsWith("stream")) assert.equal(await sample(metrics, "streams_total", { outcome: "cancelled" }), 1);
     const next = await app.inject({ method: "POST", url: "/v1/chat", headers: chatHeaders, payload: chatPayload });
     assert.equal(next.statusCode, 200);
     assert.equal(next.json().message.content, "next");

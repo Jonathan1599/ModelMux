@@ -23,6 +23,23 @@ function fixture() {
   };
 }
 
+test("job observations use bounded read-only queue counts and availability-to-claim wait", async () => {
+  const pool = { async query(query: string | { text: string; values: string[]; query_timeout: number }) {
+    if (typeof query === "object") {
+      assert.match(query.text, /SELECT status, COUNT\(\*\)/);
+      assert.match(query.text, /status IN \('queued', 'retrying', 'active'\)/);
+      assert.deepEqual(query.values, ["test"]);
+      assert.equal(query.query_timeout, 1000);
+      return { rows: [{ status: "queued", count: "3" }, { status: "active", count: "2" }] };
+    }
+    assert.match(query, /NOW\(\) - available_at/);
+    return { rows: [{ id: "job", owner_id: "owner", request_id: "request", data: "hello", attempts_made: 2, queue_wait_ms: "12.5" }] };
+  } } as unknown as Pool;
+  const store = new PostgresJobStore<string, string>(pool, { name: "test", maxAttempts: 3, backoffMs: 100, leaseMs: 1000 });
+  assert.deepEqual(await store.queueDepth(), { queued: 3, retrying: 0, active: 2 });
+  assert.equal((await store.claim({ id: "job", attempt: 2 }))?.queueWaitTimeMs, 12.5);
+});
+
 test("outbox does not clear pending publication or commit before confirmation", async () => {
   const { store, statements } = fixture();
   let confirm!: () => void;

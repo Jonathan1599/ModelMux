@@ -10,12 +10,15 @@ import { CircuitBreaker } from "../src/providers/circuit-breaker";
 import type { LLMProvider } from "../src/providers/provider";
 import { ProviderRouter } from "../src/providers/router";
 import type { ChatRequest, ChatResponse } from "../src/types/chat";
+import { Metrics } from "../src/observability/metrics";
+import { metricSample as sample } from "./helpers/metric-sample";
 
 const body: ChatRequest = { model: "local", messages: [{ role: "user", content: "Hello" }] };
 const answer: ChatResponse = { message: { role: "assistant", content: "answer" } };
 const headers = { authorization: "Bearer alice", "x-cache-mode": "use" };
 
 function fixture(cacheEnabled = true, overrideProvider?: LLMProvider) {
+  const metrics = new Metrics("gateway");
   const entries = new Map<string, ChatResponse>();
   const calls = { reads: 0, writes: 0, provider: 0, rateLimit: 0, streams: 0, jobs: 0 };
   const access = { authenticated: true, allowed: true };
@@ -35,7 +38,7 @@ function fixture(cacheEnabled = true, overrideProvider?: LLMProvider) {
   };
   const limiter = new InMemoryConcurrencyLimiter({ maxConcurrent: 1, maxQueueSize: 0, waitTimeoutMs: 100 });
   const app = buildApp({
-    provider, chatCache: cacheEnabled ? cache : undefined, concurrencyLimiter: limiter, logger: false,
+    provider, chatCache: cacheEnabled ? cache : undefined, concurrencyLimiter: limiter, logger: false, metrics,
     apiKeyAuthenticator: { async authenticate(header) {
       if (!access.authenticated || !["Bearer alice", "Bearer bob"].includes(header ?? "")) throw new AuthenticationError();
       return { id: header!, name: "test", keyPrefix: "test", rateLimit: { capacity: 10, refillPerSecond: 1 } };
@@ -52,11 +55,11 @@ function fixture(cacheEnabled = true, overrideProvider?: LLMProvider) {
   const send = (extraHeaders: Record<string, string> = {}, payload: unknown = body) => app.inject({
     method: "POST", url: "/v1/chat", headers: { ...headers, ...extraHeaders }, payload: payload as object,
   });
-  return { app, cache, entries, calls, access, limiter, send };
+  return { app, cache, entries, calls, access, limiter, send, metrics };
 }
 
 test("cache hit skips provider capacity but still authenticates, limits and supplies fresh request headers", async (t) => {
-  const { app, send, calls, limiter } = fixture();
+  const { app, send, calls, limiter, metrics } = fixture();
   t.after(() => app.close());
   const first = await send({ "x-request-id": "first" });
   assert.equal(first.headers["x-cache"], "MISS");
@@ -73,6 +76,8 @@ test("cache hit skips provider capacity but still authenticates, limits and supp
   assert.equal(calls.provider, 1);
   assert.equal(calls.rateLimit, 2);
   assert.equal(calls.writes, 1);
+  assert.equal(await sample(metrics, "cache_lookups_total", { status: "HIT" }), 1);
+  assert.equal(await sample(metrics, "cache_lookups_total", { status: "MISS" }), 1);
   assert.equal(limiter.snapshot().active, 1);
   assert.equal(limiter.snapshot().rejected, 0);
   occupied.release();

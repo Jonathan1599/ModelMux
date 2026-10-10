@@ -19,6 +19,7 @@ interface JobRow<TData, TResult> {
   attempts_made: number;
   response: TResult;
   error_code: string | null;
+  queue_wait_ms?: number | string;
 }
 
 export interface JobStoreOptions {
@@ -113,14 +114,36 @@ export class PostgresJobStore<TData, TResult> {
        WHERE id = $1 AND queue_name = $3 AND status IN ('queued', 'retrying')
          AND attempts_made = $2 - 1 AND attempts_made < max_attempts
          AND available_at <= NOW()
-       RETURNING *`,
+       RETURNING *, GREATEST(0, EXTRACT(EPOCH FROM (NOW() - available_at)) * 1000) AS queue_wait_ms`,
       [message.id, message.attempt, this.options.name, this.options.leaseMs],
     );
     if (!row) return null;
+    const queueWaitTimeMs = Number(row.queue_wait_ms);
     return {
       id: row.id, ownerId: row.owner_id, requestId: row.request_id,
       data: row.data, attempt: row.attempts_made,
+      ...(Number.isFinite(queueWaitTimeMs) ? { queueWaitTimeMs } : {}),
     };
+  }
+
+  // Read-only scrape query: global durable state, not a per-worker count or a
+  // RabbitMQ delivery depth. The driver wait is bounded independently of inference.
+  public async queueDepth(): Promise<{ queued: number; retrying: number; active: number }> {
+    const query = {
+      text: `SELECT status, COUNT(*) AS count FROM inference_jobs
+             WHERE queue_name = $1 AND status IN ('queued', 'retrying', 'active')
+             GROUP BY status`,
+      values: [this.options.name],
+      query_timeout: 1000,
+    };
+    const { rows } = await this.pool.query<{ status: string; count: string }>(query);
+    const depth = { queued: 0, retrying: 0, active: 0 };
+    for (const row of rows) {
+      if (row.status === "queued" || row.status === "retrying" || row.status === "active") {
+        depth[row.status] = Number(row.count);
+      }
+    }
+    return depth;
   }
 
   public async complete(message: JobEnvelope, response: TResult): Promise<void> {

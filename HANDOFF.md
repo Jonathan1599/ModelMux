@@ -1,12 +1,14 @@
 # ModelMux agent handoff
 
-Last updated: 2026-10-04. This is a snapshot; inspect `git status` and the current files before continuing.
+Last updated: 2026-10-06. This is a snapshot; inspect `git status` and the current files before continuing.
 
 ## Where we stopped
 
-Milestones 1–5 are committed. HEAD at the start of this session was `08d2678` (`feat: add provider fallback routing and circuit breakers`), and the worktree was clean. Milestone 4 live verification remains outstanding: the configured local Postgres credentials were rejected at the previous verification on 2026-09-29; this session did not retest them.
+Milestones 1–7 are committed. HEAD at the start of the observability session was `a67cafe` (`feat: added cache for user chats`), following `a610afc` (SSE), and the worktree was clean. Milestone 4 live verification remains outstanding: local Postgres credentials were rejected on 2026-09-29 and have not been verified as fixed.
 
-The user requested the next milestone, asked how many remained, then said “ok go.” Milestone 6 is implemented in the working tree: SSE streaming, cancellation through queue/router/adapters, and backpressure. No commit or Milestone 7 work was requested. Hosted fallback remains opt-in; `.env` was not edited and no hosted inference requests were made. No dependencies, SQL, Compose configuration, or worker lifecycle changes were needed.
+The user approved Milestone 8: catch up caching documentation, add gateway/worker Prometheus metrics, and provision one Grafana dashboard. Implementation is now in the working tree; local test and infrastructure verification status is below. No commit or Milestone 9 work is authorized. Hosted fallback remains opt-in; `.env` has not been edited and no hosted inference requests have been made.
+
+Milestone 7 adds opt-in (`X-Cache-Mode: use`) Redis exact caching to ordinary chat only, per API-key owner, whole request and versioned routing configuration. Hits bypass provider capacity; cache failures fail open but auth/rate limiting remain mandatory. Atomic TTL/NX writes keep the first stored answer; there is no single-flight inference guarantee. See README for retention, privacy, fallback reuse, and shared Redis memory tradeoffs. Verification before this session: strict typechecking + 131 unit/API tests and 4 socket tests passed. Live `test:cache` could not connect even with socket permissions; Docker daemon checks also failed. No cache test key was created. Previously unfinished caching documentation is now brought current.
 
 The module configuration remains **CommonJS**, with extensionless TypeScript imports (`f1d85fa`). Preserve it unless asked to change it.
 
@@ -17,12 +19,23 @@ The module configuration remains **CommonJS**, with extensionless TypeScript imp
 - Keep implementations readable and suitable for explaining in interviews. Avoid frameworks or abstractions without a concrete need.
 - Preserve the generic queue contract so another broker can replace RabbitMQ without rewriting routes or inference processing.
 - Use `response` for Fastify handler variables, following the user's naming preference.
-- Preserve all existing modified and untracked work. The current diff contains Milestone 6 on top of committed Milestones 1–5.
+- Preserve all existing modified and untracked work. The backend diff is Milestone 8 on top of committed Milestones 1–7. An unrelated untracked `melissa-site/` directory appeared during the session; it was not created, inspected, or edited by this task.
 - Do not implement later milestones or commit changes automatically. See `AGENTS.md` for the roadmap and working preferences.
 
 ## Implemented behavior
 
 Synchronous chat remains `POST /v1/chat`: API-key authentication backed by Postgres, Redis token-bucket rate limiting, process-local FIFO concurrency control, and the `LLMProvider` abstraction. A provider router now calls Ollama and optionally OpenAI. `/health` only reports that the gateway process is up.
+
+### Milestone 8 observability
+
+- Separate Fastify metrics listeners default to gateway `127.0.0.1:9464` and worker `127.0.0.1:9465`. They require no API key or Redis token; public API `/metrics` remains a 404. Compose uses container-network binds with no published metrics ports. Bind failures warn without stopping inference.
+- Each process has its own registry, labelled `service`. Typed best-effort metric events keep recording failures out of business control flow. Labels use bounded routes/methods/outcomes/providers, never prompts, model names, identities, raw URLs, or request/job IDs. Existing structured logs preserve request correlation.
+- HTTP raw finish/close hooks include auth/validation failures and hijacked SSE, count once, and release active gauges on disconnect. Transport completion/status is separate from streaming handler success/failure/cancellation. Provider metrics surround actual routed calls; circuit skips are separate, and cancellation/consumer errors are not provider failures. Durations include whole streams and awaited downstream writes, not first-token latency.
+- Gateway concurrency occupancy and admission wait/outcome metrics describe the process-local FIFO. Gateway-only `jobs_depth` reads shared Postgres nonterminal rows, not broker delivery count; aggregate replicated snapshots with `max`, not `sum`. One-second collection/driver waits bound scraping, while the existing ten-second statement timeout bounds SQL execution. Timeout does not itself cancel the query. Scrapes coalesce; failed collections emit `NaN` and collector health zero rather than misleading zero backlog.
+- Worker metrics begin after a successful claim and end after result/retry persistence, before broker ack. Duplicates with no claim do not count as attempts. Retries count claimed attempt numbers greater than one; queue wait is database availability-to-claim time, excluding intentional backoff. Attempt outcomes are not unique terminal jobs; a completion update can be fenced to a no-op. Persistence failures remain infrastructure failures and leave deliveries unacknowledged.
+- Optional Compose `observability` profile provisions Prometheus and one Grafana dashboard; UIs bind host loopback on 9090 and 3001. Prometheus retains seven days and scrapes every 15s. Dashboard covers HTTP p50/p95, rejection/occupancy/wait, provider errors/latency/routing/circuits, cache, SSE outcomes, durable backlog, and worker attempts/retries. No synthetic benchmark data is included. Low/no traffic can mean absent series; labelled counters appear on observation.
+- Token usage/cost are explicitly deferred until the provider-neutral contract carries reliable metadata. `prom-client` 15 is used for the current Node 20 runtime; npm deprecates it in favor of `@prometheus-io/client`, whose current version requires newer Node. The warning was disclosed; a runtime/dependency migration is a follow-up, not silently included here.
+- Docs cover metrics interpretation, privacy, provisioning, host-vs-Compose targeting, and verification limits. Live Prometheus/Grafana and new SQL remain unverified; see below.
 
 ### Milestone 6 streaming and cancellation behavior
 
@@ -62,6 +75,10 @@ States are `queued`, `active`, `retrying`, `completed`, and `failed`. Polling an
 
 | File or group | Responsibility |
 | --- | --- |
+| `src/observability/telemetry.ts`, `metrics.ts` | Best-effort typed events, per-process registries, low-cardinality metric definitions and snapshot collection |
+| `src/observability/http.ts`, `server.ts` | HTTP transport lifecycle hooks and independent internal scrape listener |
+| `observability/` | Prometheus scrape config, Grafana datasource/dashboard provisioning, and overview dashboard |
+| `src/cache/` | Owner-scoped exact-cache identity, eligibility contract, and bounded Redis operations |
 | `src/queue/job-queue.ts` | Generic `JobQueue<TData, TResult>` with `enqueue()` / `getJob()`, `JobProcessor`, and `JobWorker.run()` / `close()` |
 | `src/queue/rabbitmq.ts` | Queue adapter, dispatch/maintenance loop, attempt processing, persistence-before-ack ordering |
 | `src/queue/rabbitmq-broker.ts` | AMQP connection, topology, confirms, mandatory routing, prefetch, acknowledgements, shutdown |
@@ -81,18 +98,20 @@ States are `queued`, `active`, `retrying`, `completed`, and `failed`. Polling an
 | `db/migrations/002_create_inference_jobs.sql` | Jobs table, constraints, and indexes |
 | `src/scripts/migrate.ts` | Applies all sorted SQL migration files; current migrations are idempotent |
 | `src/config.ts`, `.env.example` | RabbitMQ URL and job concurrency/attempt/backoff configuration |
-| `docker-compose.yml` | Gateway, worker, RabbitMQ, Redis, Ollama; connects to host Postgres |
-| `package.json`, `package-lock.json` | `amqplib` and types, worker and integration-test scripts; BullMQ removed |
+| `docker-compose.yml` | Gateway, worker, RabbitMQ, Redis, Ollama; optional monitoring profile; connects to host Postgres |
+| `package.json`, `package-lock.json` | Runtime dependencies including `amqplib`/`prom-client`, worker and verification scripts |
 | `test/jobs.test.ts`, `test/inference-processor.test.ts` | Mocked API and provider-processing tests |
 | `test/circuit-breaker.test.ts`, `test/provider-routing.test.ts` | Deterministic recovery races, mapping/fallback policy, HTTP/worker integration, logs, retry delay |
 | `test/openai.test.ts`, `test/create-provider.test.ts` | Hosted adapter validation/timeouts and real factory composition with mocked HTTP |
 | `test/provider-streaming.test.ts`, `test/sse.test.ts`, `test/concurrency.test.ts` | Stream parsing, deadlines, backpressure, fallback/circuit cancellation, FIFO aborts |
 | `test/http/streaming.test.ts`, `test/helpers/chat-app.ts` | Localhost HTTP streaming, disconnect, and shutdown tests with stub dependencies |
+| `test/metrics.test.ts`, `test/http/metrics.test.ts`, `test/observability-config.test.ts` | Metric values/privacy/failure isolation, real HTTP scrape boundary, static dashboard/config contracts |
+| `test/*cache*.test.ts`, `test/cache/` | Mocked cache semantics and separately invoked live Redis verification |
 | `test/rabbitmq*.test.ts`, `test/postgres-job-store.test.ts`, `test/config.test.ts` | Broker/worker failure ordering, outbox confirmation, and configuration tests |
 | `test/integration/` | Real Postgres job-store tests and RabbitMQ + Postgres tests with a stub provider |
 | `README.md`, `AGENTS.md`, `TODO.md` | Setup and streaming/API examples, roadmap/preferences, cancellation status and verification follow-ups |
 
-BullMQ source, tests, dependency, and stale compiled adapter files were removed. Redis is still required for rate limiting. Old Redis queue jobs are not automatically migrated.
+BullMQ source, tests, dependency, and stale compiled adapter files were removed. Redis is still required for rate limiting and also serves optional exact caching. Old Redis queue jobs are not automatically migrated.
 
 ## Decisions and limitations to preserve
 
@@ -106,19 +125,22 @@ BullMQ source, tests, dependency, and stale compiled adapter files were removed.
 - **Dead letters:** malformed deliveries and permanent/exhausted processing failures are rejected. Postgres status is authoritative; a crash between recording failure and rejection, or lease exhaustion, can leave a failed job without a dead-letter copy.
 - **Retention:** worker maintenance deletes terminal Postgres jobs after 24 hours; deduplication expires when the row is removed. Dead-letter messages have a 24-hour TTL. Pending backlog is unbounded in this milestone.
 - **Availability:** the gateway writes jobs to Postgres without connecting to RabbitMQ, so `202` can succeed while the broker is down. Workers publish when available again.
-- **Deferred:** exact caching, metrics, load testing, and later semantic-cache experiments. Streaming/cancellation is implemented; remaining live verification and deliberate limitations are recorded in `TODO.md`.
+- **Deferred:** load testing, final polish, token usage/cost metadata, and optional semantic-cache experiments. Exact caching, metrics, and streaming/cancellation are implemented; remaining live verification and deliberate limitations are recorded in `TODO.md`.
 
 ## Verification at handoff
 
-Current session verification (2026-10-04):
+Current session verification (2026-10-06):
 
 | Command | Result |
 | --- | --- |
-| `npm run check` | Passed: strict source/test typechecking and all 113 unit/injection tests |
-| `npm run test:streaming` | Passed all 4 real localhost HTTP tests, including shutdown with 12 queued requests; initial sandbox EPERM resolved by an approved socket-enabled rerun |
+| `npm run check` | Passed: strict source/test typechecking and all 144 unit/injection tests, including static dashboard/config contracts |
+| `npm run test:streaming` | Passed all 4 real localhost HTTP tests with socket permissions, including disconnect metrics and shutdown with 12 queued requests |
+| `npm run test:metrics` | Passed 1 real localhost HTTP test with socket permissions: separate unauthenticated scrape endpoint, API rate-limit isolation, correct completion count |
 | `npm run build` | Passed |
-| `docker compose config --quiet` | Not rerun; Compose unchanged. Passed on 2026-09-29 |
+| `docker compose --profile observability config --quiet` | Passed; does not validate live Prometheus/Grafana rendering |
+| `docker compose --profile observability ps` | Approved daemon access still failed: cannot connect to `/var/run/docker.sock`. Live monitoring unavailable |
 | `git diff --check` | Passed |
+| `npm run test:cache` | Not rerun in Milestone 8; previous approved attempt could not connect to Redis, created no test key |
 | `npm run test:store` | Not rerun. Previous approved run (2026-09-29) failed local Postgres authentication (`28P01`, user `modelmux`) before creating a test schema |
 | `npm run test:integration` | Not rerun this session; previous runs failed the shared database prerequisite |
 | Live Ollama/OpenAI streaming/fallback | Not run; mocked protocol tests and a real localhost stub upstream only. No paid requests were sent |
@@ -129,7 +151,7 @@ The failed integration run did not create its test schemas or reach RabbitMQ che
 
 ## How to resume
 
-1. Read this handoff, inspect the current diff (including untracked files), and follow the user's latest request. Milestone 6 is implemented with passing unit/type/socket checks; live database/broker/provider verification remains outstanding. Do not start caching automatically.
+1. Read this handoff, inspect the current backend diff (including untracked observability files), and follow the user's latest request. Milestone 8 implementation is in the working tree; live infrastructure/provider verification remains outstanding. Preserve unrelated user work. Do not start Milestone 9 or commit automatically.
 2. Once valid local Postgres credentials are configured, ensure RabbitMQ is available. Do not introduce a Postgres container as a workaround.
 3. Run the integration tests below and fix any actual SQL, AMQP, retry, or shutdown failures. Record new results here. Tests need permission to create a schema in the configured database; they create and remove only random test schemas and queues, use a stub provider, and do not touch application tables.
 
@@ -158,4 +180,4 @@ npm run worker:dev
 
 The migration command intentionally installs application tables; integration tests isolate their own tables without requiring that application migration. No live Ollama smoke test of the new async path has been completed in this pass.
 
-After code changes, run `npm run check`, `npm run test:streaming`, and `npm run build`; validate Compose if edited. Use README's `curl -N` example for a live streaming smoke test once auth dependencies work. Do not mark live verification complete until it actually passes. Do not proceed to Milestone 7 without the user's request. Hosted fallback activation requires the user's own key and choice of hosted model; see README for the exact environment settings.
+After code changes, run `npm run check`, `npm run test:streaming`, `npm run test:metrics`, and `npm run build`; validate Compose if edited. Run `npm run test:cache` once Redis is available. Use README's `curl -N` example for a live streaming smoke test once auth dependencies work. For monitoring, start the README's optional Compose profile and check both Prometheus targets, collector health, and the Grafana dashboard; static tests do not parse PromQL or prove live rendering. Do not mark live verification complete until it actually passes. Hosted fallback activation requires the user's own key and choice of hosted model; see README for exact environment settings.

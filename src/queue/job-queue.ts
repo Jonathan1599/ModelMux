@@ -30,6 +30,8 @@ export interface ProcessingJob<TData> extends JobReceipt {
   ownerId: string;
   data: TData;
   attempt: number;
+  // Adapter-observed wait since this attempt became eligible, excluding backoff.
+  queueWaitTimeMs?: number;
 }
 
 export type JobProcessor<TData, TResult> = (

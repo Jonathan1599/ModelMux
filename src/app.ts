@@ -13,6 +13,8 @@ import type { InferenceJobs } from "./jobs/inference-jobs";
 import type { LLMProvider } from "./providers/provider";
 import type { ProviderHealth } from "./providers/router";
 import type { RateLimiter } from "./rate-limit/rate-limiter";
+import type { MetricSink } from "./observability/telemetry";
+import { observeHttp } from "./observability/http";
 import { chatRoutes } from "./routes/chat";
 import { jobRoutes } from "./routes/jobs";
 import { providerRoutes } from "./routes/providers";
@@ -24,6 +26,7 @@ export interface BuildAppOptions {
   rateLimiter: RateLimiter;
   concurrencyLimiter: ConcurrencyLimiter;
   chatCache?: ChatCache | undefined;
+  metrics?: MetricSink | undefined;
   jobs: InferenceJobs;
   logger?: FastifyServerOptions["logger"];
 }
@@ -35,6 +38,7 @@ export function buildApp({
   rateLimiter,
   concurrencyLimiter,
   chatCache,
+  metrics,
   jobs,
   logger = { level: "info" },
 }: BuildAppOptions): FastifyInstance {
@@ -43,6 +47,7 @@ export function buildApp({
     requestIdHeader: "x-request-id",
     genReqId: () => randomUUID(),
   });
+  if (metrics) observeHttp(app, metrics);
 
   app.addHook("onRequest", async (request, reply) => {
     void reply.header("x-request-id", request.id);
@@ -53,8 +58,9 @@ export function buildApp({
     configureApiKeyGuard(protectedApp, {
       authenticator: apiKeyAuthenticator,
       rateLimiter,
+      metrics,
     });
-    await protectedApp.register(chatRoutes, { provider, concurrencyLimiter, chatCache });
+    await protectedApp.register(chatRoutes, { provider, concurrencyLimiter, chatCache, metrics });
     await protectedApp.register(jobRoutes, { jobs });
     if (providerHealth) {
       await protectedApp.register(providerRoutes, { snapshot: providerHealth });

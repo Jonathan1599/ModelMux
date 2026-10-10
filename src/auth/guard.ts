@@ -2,6 +2,7 @@ import type { FastifyInstance } from "fastify";
 import { RateLimitExceededError } from "../errors";
 import type { RateLimiter } from "../rate-limit/rate-limiter";
 import type { ApiKeyAuthenticator, ApiKeyPrincipal } from "./api-keys";
+import { recordMetric, type MetricSink } from "../observability/telemetry";
 
 declare module "fastify" {
   interface FastifyRequest {
@@ -12,11 +13,12 @@ declare module "fastify" {
 export interface ApiKeyGuardOptions {
   authenticator: ApiKeyAuthenticator;
   rateLimiter: RateLimiter;
+  metrics?: MetricSink | undefined;
 }
 
 export function configureApiKeyGuard(
   app: FastifyInstance,
-  { authenticator, rateLimiter }: ApiKeyGuardOptions,
+  { authenticator, rateLimiter, metrics }: ApiKeyGuardOptions,
 ): void {
   app.decorateRequest("apiKey", null);
 
@@ -33,6 +35,7 @@ export function configureApiKeyGuard(
     });
 
     if (!decision.allowed) {
+      recordMetric(metrics, { kind: "rate_limit_rejection" });
       throw new RateLimitExceededError(decision.retryAfterSeconds);
     }
   });

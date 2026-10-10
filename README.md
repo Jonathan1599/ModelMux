@@ -14,6 +14,7 @@ Client
   -> atomic Redis token bucket
   -> Fastify schema validation
   -> POST /v1/chat
+       -> opt-in exact cache (hit returns immediately)
        -> bounded process-local concurrency limiter
        -> ProviderRouter -> Ollama (primary) -> ChatResponse
                          -> OpenAI (configured fallback on transient failures)
@@ -56,7 +57,7 @@ Provider execution is protected separately by a process-local concurrency limite
 
 The synchronous wait queue is FIFO, bounded, and held only in gateway memory. It absorbs short bursts but is not a durable job queue. Each gateway replica has its own limit. Async jobs use RabbitMQ's single-active-consumer mode with prefetch set to `JOB_CONCURRENCY`. One worker consumes at a time; additional workers are standbys and may also dispatch pending publications. All workers should use the same concurrency setting. With one gateway and the defaults, normal capacity is four Ollama calls: two synchronous calls plus two async jobs. Size these limits together for your provider. Connection loss and lease recovery can temporarily overlap old and new executions; this is not an exactly-once execution guarantee.
 
-Successful admissions emit structured fields for queue wait time, active executions, and queued requests. The limiter also tracks admitted, rejected, timed-out, aborted acquisitions, total-wait, and maximum-wait values for the later metrics milestone. Disconnects remove queued waiters or abort active provider requests; logs distinguish cancellation during queueing from execution. Acquired permits are always released in `finally`.
+Successful admissions emit structured fields for queue wait time, active executions, and queued requests. Metrics count admitted, rejected, timed-out, and cancelled acquisitions, observe wait times, and expose live occupancy. Disconnects remove queued waiters or abort active provider requests; logs distinguish cancellation during queueing from execution. Acquired permits are always released in `finally`.
 
 ### Provider routing and circuit breakers
 
@@ -107,7 +108,7 @@ One execution can take up to the sum of both configured provider timeouts (120s 
 
 `src/queue/job-queue.ts` defines `JobQueue<TData, TResult>` with `enqueue()` and `getJob()`, plus a `JobProcessor` callback and a worker lifecycle contract (`run()` / `close()`). Routes and `src/jobs/inference-processor.ts` have no broker dependency. `src/queue/rabbitmq.ts` implements the adapter and worker; `rabbitmq-broker.ts` contains AMQP operations, and `postgres-job-store.ts` manages durable job state. `server.ts` and `worker.ts` select these implementations at startup.
 
-Another broker can replace this adapter while preserving ownership, idempotency, status/result storage, retries, and graceful draining. Redis remains dedicated to rate limiting. Jobs from the earlier Redis queue implementation are not migrated automatically.
+Another broker can replace this adapter while preserving ownership, idempotency, status/result storage, retries, and graceful draining. Redis serves rate limiting and optional exact-response caching, not jobs. Jobs from the earlier Redis queue implementation are not migrated automatically.
 
 ### Why the job table also acts as an outbox
 
@@ -181,6 +182,28 @@ A successful response has a provider-neutral shape:
 ```
 
 Rate-limited requests return `429` and include `Retry-After`, `X-RateLimit-Limit`, and `X-RateLimit-Remaining` headers.
+
+### Opt into exact caching
+
+Only ordinary `POST /v1/chat` supports caching. Add `X-Cache-Mode: use` to reuse a completed answer for the same API-key owner and exact validated request:
+
+```bash
+curl --include http://localhost:3000/v1/chat \
+  --header "authorization: Bearer ${API_KEY}" \
+  --header 'content-type: application/json' \
+  --header 'x-cache-mode: use' \
+  --data '{"model":"llama3.2","messages":[{"role":"user","content":"Explain TCP in one sentence."}]}'
+```
+
+`X-Cache` reports `HIT`, `MISS`, or `BYPASS`. A miss does not guarantee a write: oversized answers and cache-write failures are skipped. Missing `X-Cache-Mode`, explicit `bypass`, or request `Cache-Control: no-store`/`no-cache` bypass both reads and writes. Bypass does not delete an existing entry. Invalid cache modes return `400`. Responses use `Cache-Control: no-store` to prevent intermediary HTTP caching.
+
+Authentication, rate limiting, and validation always precede lookup. Hits skip provider capacity and routing, preserve fresh HTTP request IDs/rate-limit headers, and do not change circuit health. Keys hash the API-key owner, complete ordered conversation, model, cache version, and routing configuration. Object property order is ignored; message order, roles, whitespace, and content are not. Shared API keys share a cache scope—this is not separate end-user isolation.
+
+Successful routed answers, including fallback answers, can be reused until expiration even if the primary recovers. No errors or partial streams are cached. Concurrent misses can still run multiple inferences; atomic Redis `SET EX NX` keeps the first stored answer without renewing its lifetime. Cache reads have bounded byte counts and validate the stored response. Cache commands default to a 100ms budget; read errors bypass caching and write errors preserve the generated answer. Cancellation interrupts waiting, but cannot retract a Redis write already sent. Provider capacity is released before cache writes.
+
+Default retention is five minutes and the serialized answer limit is 65,536 UTF-8 bytes. Set `CHAT_CACHE_TTL_SECONDS=0` to disable globally. Bump `CHAT_CACHE_VERSION` after in-place model/template changes; old entries become unreachable and expire normally. TTL changes affect new entries, not old ones. Streaming and async jobs are unchanged; this is exact matching, not semantic caching or in-flight deduplication.
+
+Redis now stores answer text, which can contain private information. Hashed keys are not encryption; TTL is not secure erasure from AOF files/backups. The cache uses a separate connection but shares Redis capacity with rate limiting. Per-entry bounds and TTL do not impose a global memory cap. Preserve the existing `noeviction` policy for limiter correctness; a full Redis instance can still make rate limiting fail closed even though cache errors are ignored. Separate capacity planning is needed before production use.
 
 ### Stream an answer
 
@@ -296,11 +319,75 @@ For compiled execution, run `npm run build`, then `npm start` and `npm run worke
 
 The final three arguments to `api-key:create` are the key name, burst capacity, and tokens refilled per second.
 
+## Observability
+
+Gateway and worker each expose a separate internal `/metrics` listener. Host defaults are `127.0.0.1:9464` and `127.0.0.1:9465` respectively:
+
+```bash
+curl http://127.0.0.1:9464/metrics
+curl http://127.0.0.1:9465/metrics
+```
+
+These listeners do not require an API key or consume rate-limit tokens. The public API port does **not** serve `/metrics`. Scraping does not invoke providers. Listener failures log a warning without stopping inference, and metric recording is best-effort: telemetry errors must not change admission, routing, cancellation, persistence, or acknowledgement decisions. Metrics are not an audit ledger.
+
+### Prometheus and Grafana
+
+The supplied scrape configuration targets the **Compose** gateway and worker, not host-running Node processes. After completing the Compose setup and database migration above, rebuild those services and start the optional monitoring profile:
+
+```bash
+docker compose up -d --build gateway worker
+docker compose --profile observability up -d prometheus grafana
+```
+
+- Prometheus: `http://localhost:9090`; check that both `modelmux` targets are up.
+- Grafana: `http://localhost:3001`; open **ModelMux → ModelMux Overview**.
+- Local Grafana login: `admin` / `modelmux-local-only`, unless `GRAFANA_ADMIN_PASSWORD` was set before the Grafana database was first initialized. Changing that variable does not reset an existing account's password.
+
+Datasource and dashboard provisioning live under `observability/`; edit those versioned files rather than the Grafana UI. Prometheus scrapes every 15 seconds and retains samples for seven days in a named volume. Grafana configuration also persists in a named volume. See [Grafana provisioning](https://grafana.com/docs/grafana/latest/administration/provisioning/) for the file-based setup.
+
+Compose binds metrics on its container network without publishing their ports; only the monitoring UIs are published, on host loopback. Host-running Node listeners also default to loopback. Keep these unauthenticated endpoints private: non-local deployments need deliberate network restrictions and authenticated/TLS access. The development Grafana password is not suitable for shared use. To monitor host-running Node from a container, configure networking and scrape targets explicitly; container `localhost` is not the host.
+
+### Reading the metrics
+
+Every application metric starts with `modelmux_` and has `service="gateway"` or `service="worker"`. Prometheus adds target labels such as `instance`. Labels are bounded: route templates, fixed methods/outcomes, and provider names. No prompts, answers, keys, owner IDs, job IDs, request IDs, arbitrary model names, or raw URL paths become metric labels. Use the existing correlated structured logs to investigate an individual request.
+
+| Metric family (omit `modelmux_` below) | Meaning |
+| --- | --- |
+| `http_requests_total`, `http_duration_seconds`, `http_active` | HTTP transport outcomes, lifetime, and in-flight requests, including authentication/validation failures |
+| `rate_limit_rejections_total` | Per-key token bucket rejections; distinct from concurrency rejection |
+| `admissions_total`, `queue_wait_seconds`, `concurrency_active`, `concurrency_queued` | Gateway FIFO outcomes, wait, occupied permits, and waiting requests |
+| `provider_calls_total`, `provider_duration_seconds`, `provider_active` | Actual provider calls by provider, `chat`/`stream`, and outcome |
+| `circuit_rejections_total`, `fallbacks_total`, `circuit_state` | Skipped calls, fallback routing decisions, and one-hot process-local circuit snapshots |
+| `cache_lookups_total` | Ordinary chat handler decisions: `HIT`, `MISS`, or `BYPASS` |
+| `streams_total` | SSE handler outcomes: `completed`, `failed`, or `cancelled` |
+| `jobs_depth` | Shared Postgres jobs by nonterminal status: `queued`, `retrying`, `active` |
+| `job_attempts_total`, `job_attempt_duration_seconds`, `job_attempts_active` | Worker-local claimed attempt outcomes, execution/persistence duration, and active attempts |
+| `job_queue_wait_seconds`, `job_retries_started_total` | Availability-to-claim wait and claimed attempts numbered greater than one |
+| `collector_up` | Last snapshot collection succeeded (`1`) or failed (`0`), by collector |
+
+Important interpretation details:
+
+- Durations are **seconds**. HTTP latency includes auth, queueing, and the entire stream; provider streaming latency includes awaited client writes. Neither is time to first token. The dashboard derives p50/p95 from histogram buckets, not exact request samples. Low/no traffic can yield sparse or missing series; labelled counters appear only after their first observation. See [Prometheus histograms](https://prometheus.io/docs/practices/histograms/).
+- An HTTP `completed` transport with status `200` can still contain an SSE error. Inspect `streams_total` as well: its `completed` means the server successfully wrote `done`, not that the client acknowledged receiving it. Auth/validation failures do not enter the streaming handler. Disconnected transports use outcome `aborted`; status is `none` if headers were never sent, rather than a fabricated HTTP error code.
+- Actual provider outcomes distinguish `success`, `transient_error`, `permanent_error`, `cancelled`, and `consumer_error`. Circuit skips have a separate counter and do not inflate provider latency. A fallback decision can itself meet an open fallback circuit. Circuit snapshots never trigger probes and do not prove dependency readiness.
+- Gateway FIFO depth is process-local. `jobs_depth` instead counts durable Postgres rows, including scheduled retries and unpublished jobs; it is **not RabbitMQ delivery depth**. Only gateways collect it, once per scrape. Multiple gateways see the same backlog: use `max by (status)`, not `sum`. The query adds database work proportional to nonterminal backlog, so revisit it under measured load.
+- Queue-depth collection has a one-second wait budget. Failure emits unavailable (`NaN`) depths and `collector_up{collector="jobs"}=0`, not a false zero. It does not make `/metrics` require healthy auth/Redis. The driver timeout does not cancel database execution; the existing pool's ten-second statement timeout remains the server-side bound. Prometheus `up=1` only proves scraping worked, not that every collector or dependency is healthy.
+- Worker attempt timing includes result/retry persistence but excludes claiming and broker acknowledgement. Retry counts measure attempts actually started, not retries merely scheduled. `success` means the completion write returned without error; a fenced stale write may be a no-op. Counts are not distinct completed jobs or exactly-once execution. Queue wait starts at `available_at`, excluding intentional retry backoff.
+- Token usage and estimated cost are deliberately **not reported**: the provider-neutral contract does not yet carry trustworthy usage metadata. Text fragments are not tokens. No performance or cost numbers are fabricated.
+
+The metrics client is `prom-client` 15, compatible with this repository's current Node 20 runtime. npm marks it deprecated in favor of `@prometheus-io/client`; the [replacement's manifest](https://github.com/prometheus/client_js/blob/main/package.json) currently requires Node 22/24/26+. A runtime/client migration is deferred rather than silently changing the project's runtime in this milestone.
+
+Verification covers metric values, label privacy, cancellation, failure isolation, real localhost scraping, and static dashboard/metric references. Compose configuration validates, but a live Prometheus scrape and Grafana render are still unverified because the local Docker daemon was unavailable. Postgres backlog SQL also awaits the existing database credential fix; see `HANDOFF.md`.
+
 ## Configuration
 
 | Variable | Local default | Purpose |
 | --- | --- | --- |
 | `PORT` | `3000` | Gateway listen port |
+| `METRICS_HOST` | `127.0.0.1` | Internal metrics bind address; Compose overrides to its container network |
+| `GATEWAY_METRICS_PORT` | `9464` | Gateway-only metrics listener; Compose fixes this port for its scrape target |
+| `WORKER_METRICS_PORT` | `9465` | Worker-only metrics listener; Compose fixes this port for its scrape target |
+| `GRAFANA_ADMIN_PASSWORD` | `modelmux-local-only` | Initial Compose Grafana admin password; local development only |
 | `OLLAMA_BASE_URL` | `http://localhost:11434` | Ollama server URL |
 | `OLLAMA_REQUEST_TIMEOUT_MS` | `120000` | Entire Ollama call deadline, including streaming and downstream waits |
 | `OPENAI_API_KEY` | unset | Server-side hosted credential; a key alone does not enable fallback |
@@ -310,7 +397,11 @@ The final three arguments to `api-key:create` are the key name, burst capacity, 
 | `CIRCUIT_BREAKER_RESET_TIMEOUT_MS` | `30000` | Cooldown before one recovery request is admitted |
 | `PROVIDER_STOP_GRACE_PERIOD` | `180s` | Compose gateway/worker shutdown grace; size for configured timeouts |
 | `DATABASE_URL` | `postgresql://modelmux:modelmux@localhost:5432/modelmux` | API keys, job state, results, and pending publications |
-| `REDIS_URL` | `redis://localhost:6379` | Token-bucket state |
+| `REDIS_URL` | `redis://localhost:6379` | Token-bucket state and optional exact cache |
+| `CHAT_CACHE_TTL_SECONDS` | `300` | New entry lifetime; `0` disables caching globally |
+| `CHAT_CACHE_MAX_ENTRY_BYTES` | `65536` | Maximum serialized cached answer size in UTF-8 bytes |
+| `CHAT_CACHE_TIMEOUT_MS` | `100` | Per-cache-command wait budget |
+| `CHAT_CACHE_VERSION` | `1` | Bump to invalidate lookup after in-place model/template changes |
 | `RABBITMQ_URL` | `amqp://modelmux:modelmux@localhost:5672` | Worker AMQP connection (`amqp` or `amqps`) |
 | `PROVIDER_MAX_CONCURRENCY` | `2` | Maximum active provider calls in this gateway process |
 | `PROVIDER_MAX_QUEUE_SIZE` | `20` | Maximum synchronous requests waiting for provider capacity |
@@ -353,9 +444,15 @@ npm run typecheck
 npm run build
 npm run check
 npm run test:streaming
+npm run test:metrics
+npm run test:cache
 ```
 
 Unit and injection tests mock queue/provider boundaries and need no running services. `test:streaming` separately starts ephemeral localhost HTTP servers with stub upstream responses to verify incremental delivery, disconnect cancellation, capacity recovery, and shutdown; it needs socket permissions but no database, broker, Ollama, or hosted key. Unit tests also exercise backpressure, parsing, fallback boundaries, and cancellation-safe circuit state.
+
+`test:metrics` opens ephemeral API and metrics listeners to verify unauthenticated scraping remains separate from API authentication/rate limiting. It also needs socket permissions but no external services. Static dashboard tests verify known metric names, datasource/target wiring, histogram aggregation, and shared-backlog aggregation; they are not a PromQL parser or a live Grafana test.
+
+`test:cache` uses configured Redis, creates one random-namespaced test key, verifies atomic expiry/isolation/size limits, and deletes only that key. It never flushes Redis or calls a model. Its last run could not connect to Redis; unit tests alone do not verify live Redis behavior.
 
 Integration tests use the configured local `DATABASE_URL` and `RABBITMQ_URL` to exercise real SQL concurrency, confirmed publication, retries, dead letters, results, and bounded consumption across two workers, using a stub provider:
 
@@ -373,6 +470,7 @@ Tests create and remove a random Postgres schema and random RabbitMQ queues. You
 ```text
 .
 ├── db/migrations              # Idempotent Postgres schema
+├── observability              # Prometheus config and provisioned Grafana dashboard
 ├── src
 │   ├── app.ts                 # Fastify app factory and error handling
 │   ├── cancellation.ts        # Shared cancellation error and abortable waits
@@ -387,6 +485,12 @@ Tests create and remove a random Postgres schema and random RabbitMQ queues. You
 │   ├── concurrency
 │   │   ├── concurrency-limiter.ts
 │   │   └── in-memory-concurrency-limiter.ts
+│   ├── cache                 # Owner-scoped exact keys and bounded Redis cache
+│   ├── observability
+│   │   ├── telemetry.ts      # Best-effort metric events; no business-policy decisions
+│   │   ├── metrics.ts        # Per-process registry and bounded snapshot collectors
+│   │   ├── http.ts           # HTTP completion/disconnect instrumentation
+│   │   └── server.ts         # Separate internal /metrics listener
 │   ├── providers
 │   │   ├── create-provider.ts # Shared gateway/worker composition
 │   │   ├── router.ts          # Primary-first routing and explicit fallback maps
@@ -425,4 +529,4 @@ Tests create and remove a random Postgres schema and random RabbitMQ queues. You
 └── .env.example
 ```
 
-Caching, Prometheus, Grafana, pgvector experiments, and load testing remain intentionally deferred to later milestones. Cancellation implementation and remaining verification follow-ups are tracked in `TODO.md`.
+Exact caching and observability are implemented; live infrastructure checks remain outstanding. Load testing (Milestone 9), final polish (Milestone 10), and optional pgvector experiments require follow-up work. Cancellation and remaining verification items are tracked in `TODO.md`.

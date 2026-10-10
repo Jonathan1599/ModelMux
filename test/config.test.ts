@@ -2,6 +2,15 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { loadConfig, providerExecutionTimeoutMs } from "../src/config";
 
+test("metrics bind to loopback by default and validate separate gateway/worker ports", () => {
+  assert.deepEqual(loadConfig({}).metrics, { host: "127.0.0.1", gatewayPort: 9464, workerPort: 9465 });
+  assert.deepEqual(loadConfig({ METRICS_HOST: "0.0.0.0", GATEWAY_METRICS_PORT: "9500", WORKER_METRICS_PORT: "9501" }).metrics,
+    { host: "0.0.0.0", gatewayPort: 9500, workerPort: 9501 });
+  for (const name of ["GATEWAY_METRICS_PORT", "WORKER_METRICS_PORT"]) {
+    for (const value of ["0", "-1", "65536", "bad", "1.5"]) assert.throws(() => loadConfig({ [name]: value }), new RegExp(name));
+  }
+});
+
 test("exact cache settings have safe defaults, accept overrides, and allow disabling", () => {
   assert.deepEqual(loadConfig({}).chatCache, { ttlSeconds: 300, maxEntryBytes: 65536, timeoutMs: 100, version: "1" });
   assert.deepEqual(loadConfig({

@@ -9,11 +9,13 @@ import type { ChatRequest, ChatResponse } from "../types/chat";
 import { chatRequestSchema, chatResponseSchema } from "./chat-schema";
 import { requestCancellation } from "./request-cancellation";
 import { writeSse } from "./sse";
+import { recordMetric, type CacheStatus, type MetricSink } from "../observability/telemetry";
 
 export interface ChatRoutesOptions {
   provider: LLMProvider;
   concurrencyLimiter: ConcurrencyLimiter;
   chatCache?: ChatCache | undefined;
+  metrics?: MetricSink | undefined;
 }
 
 const chatSchema = {
@@ -29,7 +31,7 @@ const chatSchema = {
 
 export const chatRoutes: FastifyPluginAsync<ChatRoutesOptions> = async (
   app,
-  { provider, concurrencyLimiter, chatCache },
+  { provider, concurrencyLimiter, chatCache, metrics },
 ) => {
   const shutdown = new AbortController();
   // Every active/queued request subscribes; each removes its listener in finally.
@@ -43,7 +45,7 @@ export const chatRoutes: FastifyPluginAsync<ChatRoutesOptions> = async (
       const cancellation = requestCancellation(request, response, shutdown.signal);
       let permit: ConcurrencyPermit | undefined;
       let phase = "cache";
-      let cacheStatus = "BYPASS";
+      let cacheStatus: CacheStatus = "BYPASS";
       const ownerId = request.apiKey!.id;
       const cacheControl = String(request.headers["cache-control"] ?? "").toLowerCase();
       let useCache = Boolean(chatCache) && request.headers["x-cache-mode"] === "use"
@@ -107,6 +109,7 @@ export const chatRoutes: FastifyPluginAsync<ChatRoutesOptions> = async (
         }
         throw error;
       } finally {
+        recordMetric(metrics, { kind: "cache", status: cacheStatus });
         void response.header("x-cache", cacheStatus);
         request.log.info({ cacheStatus }, "Chat cache lookup completed");
         cancellation.abort();
@@ -122,6 +125,7 @@ export const chatRoutes: FastifyPluginAsync<ChatRoutesOptions> = async (
     const cancellation = requestCancellation(request, response, shutdown.signal);
     let permit: ConcurrencyPermit | undefined;
     let started = false;
+    let outcome: "completed" | "failed" | "cancelled" = "failed";
     const start = () => {
       throwIfCancelled(cancellation.signal);
       if (started) return;
@@ -158,9 +162,11 @@ export const chatRoutes: FastifyPluginAsync<ChatRoutesOptions> = async (
       }, { logger: request.log, signal: cancellation.signal });
       start(); // A valid empty answer still receives a done event.
       await writeSse(response.raw, "done", { requestId: request.id }, cancellation.signal);
+      outcome = "completed";
       response.raw.end();
     } catch (error) {
       if (error instanceof RequestAbortedError || cancellation.signal.aborted) {
+        outcome = "cancelled";
         request.log.info({ abortedPhase: permit ? "execution" : "queue" }, "Stream cancelled or client stopped reading");
         response.hijack();
         response.raw.destroy();
@@ -184,6 +190,7 @@ export const chatRoutes: FastifyPluginAsync<ChatRoutesOptions> = async (
         } catch { response.raw.destroy(); }
       }
     } finally {
+      recordMetric(metrics, { kind: "stream", outcome });
       cancellation.abort();
       cancellation.dispose();
       permit?.release();
